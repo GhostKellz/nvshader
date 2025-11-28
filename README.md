@@ -8,28 +8,29 @@ A comprehensive shader cache management system that eliminates stuttering, enabl
 
 nvshader solves the notorious "shader compilation stutter" problem on Linux by providing:
 
-- **Unified Cache Management** - Single interface for DXVK, vkd3d-proton, and driver caches
-- **Pre-warming Tools** - Compile shaders before gameplay
-- **P2P Cache Sharing** - Share compiled shaders with other users
-- **Cache Analytics** - Understand and optimize shader performance
-- **Automatic Optimization** - GPU-specific shader compilation flags
+- **Unified Cache Management** - Single interface for DXVK, vkd3d-proton, Mesa, and NVIDIA driver caches
+- **Pre-warming Tools** - Compile Fossilize shaders before gameplay
+- **Real-time Monitoring** - Watch shader compilation in real-time with inotify
+- **Cache Sharing** - Export/import .nvcache packages with GPU compatibility checking
+- **Steam Integration** - Steam Deck support, per-game cache status
+- **JSON API** - Scriptable output for integration with nvcontrol
 
 ## The Problem
 
 ```
 Without nvshader:
-┌────────────────────────────────────────────────────────┐
-│  Frame 1: 16ms  │  Frame 2: 250ms (stutter!)  │ ...   │
-│  ████████       │  ████████████████████████████████   │
-│                 │  ^ Shader compilation mid-game      │
-└────────────────────────────────────────────────────────┘
++--------------------------------------------------------+
+|  Frame 1: 16ms  |  Frame 2: 250ms (stutter!)  | ...   |
+|  ========       |  ================================== |
+|                 |  ^ Shader compilation mid-game      |
++--------------------------------------------------------+
 
 With nvshader:
-┌────────────────────────────────────────────────────────┐
-│  Frame 1: 16ms  │  Frame 2: 16ms  │  Frame 3: 16ms    │
-│  ████████       │  ████████       │  ████████         │
-│  All shaders pre-compiled before game launch          │
-└────────────────────────────────────────────────────────┘
++--------------------------------------------------------+
+|  Frame 1: 16ms  |  Frame 2: 16ms  |  Frame 3: 16ms    |
+|  ========       |  ========       |  ========         |
+|  All shaders pre-compiled before game launch          |
++--------------------------------------------------------+
 ```
 
 ## Features
@@ -39,180 +40,171 @@ With nvshader:
 | Cache Type | Location | Purpose |
 |------------|----------|---------|
 | **NVIDIA Driver** | `~/.nv/ComputeCache/` | GPU binary cache |
-| **DXVK** | `~/.cache/dxvk/` | DX9/10/11 → Vulkan |
-| **vkd3d-proton** | `~/.cache/vkd3d-proton/` | DX12 → Vulkan |
+| **DXVK** | `~/.cache/dxvk/` | DX9/10/11 -> Vulkan |
+| **vkd3d-proton** | `~/.cache/vkd3d-proton/` | DX12 -> Vulkan |
 | **Mesa** | `~/.cache/mesa_shader_cache/` | OpenGL shaders |
-| **Fossilize** | Steam's shader pre-caching | Vulkan pipeline cache |
+| **Fossilize/Steam** | `~/.steam/.../shadercache/` | Vulkan pipeline cache |
 
-### Architecture
+## Installation
 
+### From Source (Zig 0.16+)
+
+```bash
+git clone https://github.com/yourname/nvshader
+cd nvshader
+zig build -Doptimize=ReleaseFast
+sudo cp zig-out/bin/nvshader /usr/local/bin/
 ```
-┌─────────────────────────────────────────────────────────┐
-│                      nvshader                            │
-├───────────┬───────────┬───────────┬────────────────────┤
-│  manager  │  prewarm  │   share   │     optimize       │
-│  (cache)  │  (compile)│   (p2p)   │     (flags)        │
-├───────────┴───────────┴───────────┴────────────────────┤
-│              Fossilize Integration Layer                 │
-├─────────────────────────────────────────────────────────┤
-│     DXVK Cache    │   vkd3d Cache   │   Driver Cache    │
-└─────────────────────────────────────────────────────────┘
+
+### Arch Linux (AUR)
+
+```bash
+yay -S nvshader
 ```
 
 ## Usage
 
-### CLI Tool
+### Basic Commands
 
 ```bash
 # View cache statistics
 nvshader status
 
-# Pre-warm shaders for a game
-nvshader prewarm --game "Cyberpunk 2077"
+# Show GPU profile (architecture, driver version)
+nvshader gpu
 
-# Export cache for sharing
-nvshader export --game "Elden Ring" --output elden-ring-rtx4090.nvcache
+# List detected games with cache info
+nvshader games
 
-# Import shared cache
-nvshader import rtx4090-cache.nvcache
+# Monitor shader compilation in real-time
+nvshader watch
 
-# Clean old/invalid cache entries
-nvshader clean --older-than 30d
+# Pre-warm Fossilize shader caches
+nvshader prewarm --threads 8
 
-# Optimize cache for current GPU
-nvshader optimize --gpu auto
+# Validate cache integrity
+nvshader validate
 
-# Watch shader compilation in real-time
-nvshader watch --pid $(pgrep game)
+# Clean old cache entries
+nvshader clean --older-than 30 --max-size 10G
 ```
 
-### Library API (Zig)
-
-```zig
-const nvshader = @import("nvshader");
-
-pub fn main() !void {
-    var cache = try nvshader.CacheManager.init(.{
-        .gpu_id = try nvshader.detectGpu(),
-        .cache_paths = .auto,
-    });
-    defer cache.deinit();
-
-    // Pre-warm shaders for a game
-    const game = try cache.findGame("Cyberpunk 2077");
-    try cache.prewarm(game, .{
-        .parallel_jobs = 8,
-        .progress_callback = progressFn,
-    });
-
-    // Get cache statistics
-    const stats = try cache.getStats(game);
-    std.log.info("Shaders cached: {d}/{d}", .{
-        stats.cached_count,
-        stats.total_count,
-    });
-}
-```
-
-### C API
-
-```c
-#include <nvshader/nvshader.h>
-
-nvshader_cache_t* cache = nvshader_init(NVSHADER_AUTO_DETECT);
-
-// Pre-warm game shaders
-nvshader_prewarm(cache, "Cyberpunk 2077", NULL);
-
-// Get statistics
-nvshader_stats_t stats;
-nvshader_get_stats(cache, "Cyberpunk 2077", &stats);
-printf("Cached: %d/%d shaders\n", stats.cached, stats.total);
-
-nvshader_cleanup(cache);
-```
-
-## P2P Cache Sharing
-
-Share shader caches with the community:
+### Steam Integration
 
 ```bash
-# Upload your cache to the nvshader network
-nvshader share upload --game "Elden Ring"
+# Show Steam installation info
+nvshader steam info
 
-# Download community caches for your GPU
-nvshader share download --game "Elden Ring" --gpu rtx4090
+# Per-game shader cache status
+nvshader steam cache
 
-# Browse available caches
-nvshader share list --game "Elden Ring"
+# Clear shader cache for a specific game
+nvshader steam clear 570
+
+# Steam Deck info and recommendations
+nvshader steam deck
 ```
 
-### Cache Compatibility
-
-Caches are organized by:
-- GPU architecture (Ampere, Ada, etc.)
-- Driver version range
-- Game version
-- DXVK/vkd3d-proton version
-
-## Steam Integration
+### Export/Import Caches
 
 ```bash
-# Pre-warm all installed Steam games
-nvshader steam prewarm --all
+# Export all caches to a directory
+nvshader export ~/shader-backup --game "Elden Ring"
 
-# Watch for new shader compilations
-nvshader steam watch
+# Import caches from directory
+nvshader import ~/shader-backup --dest ~/.cache/dxvk/
 
-# Add to Steam launch options for status display
-NVSHADER_OVERLAY=1 %command%
+# Create .nvcache package for sharing
+nvshader pack ~/elden-ring.nvcache --game "Elden Ring"
 ```
+
+### JSON Output (for scripting/nvcontrol)
+
+```bash
+# Status as JSON
+nvshader json status
+
+# GPU info as JSON
+nvshader json gpu
+
+# Steam info as JSON
+nvshader json steam
+
+# Games list as JSON
+nvshader json games
+```
+
+### IPC Daemon (for nvcontrol integration)
+
+```bash
+# Start daemon for GUI integration
+nvshader daemon
+```
+
+## GPU Compatibility
+
+nvshader detects your GPU architecture for cache compatibility:
+
+| Architecture | GPUs |
+|-------------|------|
+| Blackwell | RTX 50 series |
+| Ada Lovelace | RTX 40 series |
+| Ampere | RTX 30 series |
+| Turing | RTX 20 series |
+| Pascal | GTX 10 series |
+
+## nvcontrol Integration
+
+nvshader integrates with [nvcontrol](https://github.com/yourname/nvcontrol) via:
+
+1. **JSON CLI** - `nvshader json <command>` for GUI data binding
+2. **IPC Daemon** - Unix socket at `/tmp/nvshader.sock`
+3. **Future**: `nvctl shader` alias in nvcontrol
 
 ## Building
 
 ```bash
-# Build CLI and library
-zig build -Doptimize=ReleaseFast
+# Debug build
+zig build
 
-# Build with P2P sharing support
-zig build -Doptimize=ReleaseFast -Dp2p=true
+# Release build
+zig build -Doptimize=ReleaseFast
 
 # Run tests
 zig build test
 ```
 
-## Installation
+## Requirements
 
-```bash
-# System-wide install
-sudo zig build install --prefix /usr/local
+- Linux x86_64
+- NVIDIA driver 470+ (for NVIDIA features)
+- Zig 0.16+ (for building)
+- Optional: fossilize_replay (for pre-warming)
 
-# User install
-zig build install --prefix ~/.local
+## Architecture
 
-# Enable systemd service for background pre-warming
-systemctl --user enable nvshader-prewarm.service
+```
++--------------------------------------------------------+
+|                      nvshader v0.1.0                     |
++------------+------------+------------+-----------------+
+|   cache    |  prewarm   |   watch    |     steam       |
+|  (manager) | (fossilize)|  (inotify) |   (integration) |
++------------+------------+------------+-----------------+
+|              sharing       |         ipc              |
+|         (.nvcache format)  |    (JSON + socket)       |
++----------------------------+--------------------------+
+|     DXVK    |   vkd3d    |   Mesa    |   NVIDIA      |
++----------------------------+--------------------------+
 ```
 
 ## Related Projects
 
 | Project | Purpose | Integration |
 |---------|---------|-------------|
-| **nvcontrol** | GUI control center | Cache management UI |
-| **nvproton** | Proton integration | Automatic pre-warming |
-| **Fossilize** | Valve's shader cache | Backend support |
-
-## Requirements
-
-- NVIDIA driver 470+
-- Vulkan 1.2+
-- Zig 0.12+
-- Optional: Fossilize for enhanced caching
+| **nvcontrol** | GUI control center | Full integration via IPC |
+| **nvproton** | Proton optimization | Future integration |
+| **Fossilize** | Valve's shader cache | Pre-warming backend |
 
 ## License
 
 MIT License - See [LICENSE](LICENSE)
-
-## Contributing
-
-See [TODO.md](TODO.md) for the development roadmap.

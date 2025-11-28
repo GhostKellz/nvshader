@@ -18,6 +18,25 @@ pub const CacheType = enum {
         };
     }
 
+    pub fn shortName(self: CacheType) []const u8 {
+        return switch (self) {
+            .dxvk => "dxvk",
+            .vkd3d => "vkd3d",
+            .nvidia => "nvidia",
+            .mesa => "mesa",
+            .fossilize => "fossilize",
+        };
+    }
+
+    pub fn fromString(raw: []const u8) ?CacheType {
+        if (std.ascii.eqlIgnoreCase(raw, "dxvk")) return .dxvk;
+        if (std.ascii.eqlIgnoreCase(raw, "vkd3d")) return .vkd3d;
+        if (std.ascii.eqlIgnoreCase(raw, "nvidia")) return .nvidia;
+        if (std.ascii.eqlIgnoreCase(raw, "mesa")) return .mesa;
+        if (std.ascii.eqlIgnoreCase(raw, "fossilize")) return .fossilize;
+        return null;
+    }
+
     pub fn extension(self: CacheType) []const u8 {
         return switch (self) {
             .dxvk => ".dxvk-cache",

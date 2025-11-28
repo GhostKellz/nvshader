@@ -40,20 +40,23 @@ pub const CachePaths = struct {
         const stdout = std.io.getStdOut().writer();
         stdout.print("\n📁 Cache Paths Detected:\n", .{}) catch {};
 
-        inline for (.{
-            .{ "DXVK", self.dxvk },
-            .{ "vkd3d-proton", self.vkd3d },
-            .{ "NVIDIA", self.nvidia },
-            .{ "Mesa", self.mesa },
-            .{ "Fossilize", self.fossilize },
-            .{ "Steam Shader", self.steam_shadercache },
-        }) |entry| {
-            const name = entry[0];
-            const path = entry[1];
-            if (path) |p| {
-                stdout.print("   ✓ {s}: {s}\n", .{ name, p }) catch {};
+        const items = [_]struct {
+            name: []const u8,
+            value: ?[]const u8,
+        }{
+            .{ .name = "DXVK", .value = self.dxvk },
+            .{ .name = "vkd3d-proton", .value = self.vkd3d },
+            .{ .name = "NVIDIA", .value = self.nvidia },
+            .{ .name = "Mesa", .value = self.mesa },
+            .{ .name = "Fossilize", .value = self.fossilize },
+            .{ .name = "Steam Shader", .value = self.steam_shadercache },
+        };
+
+        for (items) |item| {
+            if (item.value) |p| {
+                stdout.print("   ✓ {s}: {s}\n", .{ item.name, p }) catch {};
             } else {
-                stdout.print("   ✗ {s}: not found\n", .{name}) catch {};
+                stdout.print("   ✗ {s}: not found\n", .{item.name}) catch {};
             }
         }
     }
@@ -141,15 +144,15 @@ fn detectFossilizePath(allocator: mem.Allocator, home: []const u8) !?[]const u8 
 }
 
 fn detectSteamShaderCache(allocator: mem.Allocator, home: []const u8) !?[]const u8 {
-    // Standard Steam path
-    const paths_to_try = [_][]const u8{
-        "{s}/.steam/steam/steamapps/shadercache",
-        "{s}/.local/share/Steam/steamapps/shadercache",
-        "{s}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/shadercache",
+    // Standard Steam path suffixes (appended to home)
+    const suffixes = [_][]const u8{
+        "/.steam/steam/steamapps/shadercache",
+        "/.local/share/Steam/steamapps/shadercache",
+        "/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/shadercache",
     };
 
-    for (paths_to_try) |fmt| {
-        const path = try std.fmt.allocPrint(allocator, fmt, .{home});
+    for (suffixes) |suffix| {
+        const path = try std.mem.concat(allocator, u8, &.{ home, suffix });
         if (pathExists(path)) {
             return path;
         }

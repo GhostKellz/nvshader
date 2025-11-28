@@ -50,21 +50,29 @@ pub fn summarize(entries: []const cache.CacheEntry) types.CacheStats {
 }
 
 /// Render a short human-readable breakdown for CLI status output.
-pub fn printBreakdown(writer: anytype, stats: types.CacheStats) !void {
+pub fn printBreakdown(stats: types.CacheStats) void {
     const total_mb = stats.totalSizeMb();
-    try writer.print("Total cache size: {d:.2} MiB ({d} files)\n", .{ total_mb, stats.file_count });
-    inline for (.{
-        .{ "DXVK", stats.dxvk_size },
-        .{ "vkd3d-proton", stats.vkd3d_size },
-        .{ "NVIDIA", stats.nvidia_size },
-        .{ "Mesa", stats.mesa_size },
-        .{ "Fossilize", stats.fossilize_size },
-    }) |entry| {
-        const label = entry[0];
-        const size_bytes: u64 = entry[1];
-        if (size_bytes == 0) continue;
-        const size_float: f64 = @floatFromInt(size_bytes);
-        const size_mb = size_float / (1024.0 * 1024.0);
-        try writer.print("  • {s}: {d:.2} MiB\n", .{ label, size_mb });
+    std.debug.print("Total cache size: {d:.2} MiB ({d} files)\n", .{ total_mb, stats.file_count });
+
+    // Print each non-zero cache type
+    if (stats.dxvk_size > 0) {
+        const mb: f64 = @as(f64, @floatFromInt(stats.dxvk_size)) / (1024.0 * 1024.0);
+        std.debug.print("  • DXVK: {d:.2} MiB\n", .{mb});
+    }
+    if (stats.vkd3d_size > 0) {
+        const mb: f64 = @as(f64, @floatFromInt(stats.vkd3d_size)) / (1024.0 * 1024.0);
+        std.debug.print("  • vkd3d-proton: {d:.2} MiB\n", .{mb});
+    }
+    if (stats.nvidia_size > 0) {
+        const mb: f64 = @as(f64, @floatFromInt(stats.nvidia_size)) / (1024.0 * 1024.0);
+        std.debug.print("  • NVIDIA: {d:.2} MiB\n", .{mb});
+    }
+    if (stats.mesa_size > 0) {
+        const mb: f64 = @as(f64, @floatFromInt(stats.mesa_size)) / (1024.0 * 1024.0);
+        std.debug.print("  • Mesa: {d:.2} MiB\n", .{mb});
+    }
+    if (stats.fossilize_size > 0) {
+        const mb: f64 = @as(f64, @floatFromInt(stats.fossilize_size)) / (1024.0 * 1024.0);
+        std.debug.print("  • Fossilize: {d:.2} MiB\n", .{mb});
     }
 }

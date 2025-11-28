@@ -5,6 +5,12 @@ const math = std.math;
 const path_util = std.fs.path;
 const paths = @import("paths.zig");
 const types = @import("types.zig");
+const games = @import("games.zig");
+
+fn nowNanoseconds() i128 {
+    const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
+    return @as(i128, ts.sec) * 1_000_000_000 + ts.nsec;
+}
 
 /// DXVK cache file header (v8 format)
 pub const DxvkCacheHeader = extern struct {
@@ -24,7 +30,7 @@ pub const DxvkStateCache = struct {
         defer file.close();
 
         var header: DxvkCacheHeader = undefined;
-        try file.readNoEof(std.mem.asBytes(&header));
+        try readAllExact(file, std.mem.asBytes(&header));
 
         if (!mem.eql(u8, &header.magic, "DXVK")) return error.InvalidCacheFile;
         if (header.entry_size == 0) return error.InvalidCacheFile;
@@ -40,7 +46,7 @@ pub const DxvkStateCache = struct {
         const payload = try allocator.alloc(u8, payload_len);
         errdefer allocator.free(payload);
 
-        try file.readNoEof(payload);
+        try readAllExact(file, payload);
 
         return DxvkStateCache{
             .allocator = allocator,
@@ -86,6 +92,8 @@ pub const CacheEntry = struct {
     size_bytes: u64,
     modified_time: i128,
     game_name: ?[]const u8,
+    game_id: ?[]const u8,
+    game_source: ?games.GameSource,
     entry_count: ?u32,
     is_directory: bool,
 
@@ -94,11 +102,43 @@ pub const CacheEntry = struct {
     pub fn deinit(self: *CacheEntry) void {
         self.allocator.free(self.path);
         if (self.game_name) |name| self.allocator.free(name);
+        if (self.game_id) |id| self.allocator.free(id);
     }
 
     pub fn sizeMb(self: *const CacheEntry) f64 {
         const size_f: f64 = @floatFromInt(self.size_bytes);
         return size_f / (1024.0 * 1024.0);
+    }
+
+    pub fn assignGame(self: *CacheEntry, game: *const games.Game) !void {
+        const target_id = game.id;
+        const target_name = game.name;
+        const same_id = if (self.game_id) |existing| mem.eql(u8, existing, target_id) else false;
+
+        if (!same_id) {
+            if (self.game_id) |existing| self.allocator.free(existing);
+            if (self.game_name) |existing| self.allocator.free(existing);
+
+            const id_copy = try self.allocator.dupe(u8, target_id);
+            errdefer self.allocator.free(id_copy);
+            const name_copy = try self.allocator.dupe(u8, target_name);
+
+            self.game_id = id_copy;
+            self.game_name = name_copy;
+        } else {
+            const needs_name_update = if (self.game_name) |existing|
+                !mem.eql(u8, existing, target_name)
+            else
+                true;
+
+            if (needs_name_update) {
+                if (self.game_name) |existing| self.allocator.free(existing);
+                const name_copy = try self.allocator.dupe(u8, target_name);
+                self.game_name = name_copy;
+            }
+        }
+
+        self.game_source = game.source;
     }
 };
 
@@ -188,8 +228,10 @@ pub const CacheManager = struct {
                     .path = full_path,
                     .cache_type = .dxvk,
                     .size_bytes = stat.size,
-                    .modified_time = stat.mtime,
+                    .modified_time = timestampToNanoseconds(stat.mtime),
                     .game_name = game_name,
+                    .game_id = null,
+                    .game_source = null,
                     .entry_count = entry_count,
                     .is_directory = false,
                     .allocator = self.allocator,
@@ -227,8 +269,10 @@ pub const CacheManager = struct {
                     .path = full_path,
                     .cache_type = .vkd3d,
                     .size_bytes = stat.size,
-                    .modified_time = stat.mtime,
+                    .modified_time = timestampToNanoseconds(stat.mtime),
                     .game_name = game_name,
+                    .game_id = null,
+                    .game_source = null,
                     .entry_count = entry_count,
                     .is_directory = false,
                     .allocator = self.allocator,
@@ -264,8 +308,10 @@ pub const CacheManager = struct {
                         .path = full_path,
                         .cache_type = .fossilize,
                         .size_bytes = stat.size,
-                        .modified_time = stat.mtime,
+                        .modified_time = timestampToNanoseconds(stat.mtime),
                         .game_name = game_name,
+                        .game_id = null,
+                        .game_source = null,
                         .entry_count = null,
                         .is_directory = false,
                         .allocator = self.allocator,
@@ -298,8 +344,10 @@ pub const CacheManager = struct {
                         .path = dir_path,
                         .cache_type = .fossilize,
                         .size_bytes = size,
-                        .modified_time = stat.mtime,
+                        .modified_time = timestampToNanoseconds(stat.mtime),
                         .game_name = label,
+                        .game_id = null,
+                        .game_source = null,
                         .entry_count = count,
                         .is_directory = true,
                         .allocator = self.allocator,
@@ -346,8 +394,10 @@ pub const CacheManager = struct {
                 .path = sub_path,
                 .cache_type = .nvidia,
                 .size_bytes = size,
-                .modified_time = stat.mtime,
+                .modified_time = timestampToNanoseconds(stat.mtime),
                 .game_name = label,
+                .game_id = null,
+                .game_source = null,
                 .entry_count = count,
                 .is_directory = true,
                 .allocator = self.allocator,
@@ -360,8 +410,12 @@ pub const CacheManager = struct {
             const size = paths.getDirSize(self.allocator, base_path) catch 0;
             if (size == 0) return;
             const count = paths.countFiles(self.allocator, base_path) catch 0;
-            const stat = fs.cwd().statFileAbsolute(base_path) catch null;
-            const mtime = if (stat) |s| s.mtime else std.time.nanoTimestamp();
+            const mtime = blk: {
+                var dir_stat = fs.openDirAbsolute(base_path, .{}) catch break :blk nowNanoseconds();
+                defer dir_stat.close();
+                const status = dir_stat.stat() catch break :blk nowNanoseconds();
+                break :blk timestampToNanoseconds(status.mtime);
+            };
 
             try self.entries.append(self.allocator, CacheEntry{
                 .path = try self.allocator.dupe(u8, base_path),
@@ -369,6 +423,8 @@ pub const CacheManager = struct {
                 .size_bytes = size,
                 .modified_time = mtime,
                 .game_name = try self.allocator.dupe(u8, "NVIDIA Driver Cache"),
+                .game_id = null,
+                .game_source = null,
                 .entry_count = count,
                 .is_directory = true,
                 .allocator = self.allocator,
@@ -381,8 +437,12 @@ pub const CacheManager = struct {
         if (size == 0) return;
 
         const count = paths.countFiles(self.allocator, base_path) catch 0;
-        const stat = fs.cwd().statFileAbsolute(base_path) catch null;
-        const mtime = if (stat) |s| s.mtime else std.time.nanoTimestamp();
+        const mtime = blk: {
+            var dir_stat = fs.openDirAbsolute(base_path, .{}) catch break :blk nowNanoseconds();
+            defer dir_stat.close();
+            const status = dir_stat.stat() catch break :blk nowNanoseconds();
+            break :blk timestampToNanoseconds(status.mtime);
+        };
 
         try self.entries.append(self.allocator, CacheEntry{
             .path = try self.allocator.dupe(u8, base_path),
@@ -390,6 +450,8 @@ pub const CacheManager = struct {
             .size_bytes = size,
             .modified_time = mtime,
             .game_name = try self.allocator.dupe(u8, "Mesa Shader Cache"),
+            .game_id = null,
+            .game_source = null,
             .entry_count = count,
             .is_directory = true,
             .allocator = self.allocator,
@@ -426,16 +488,45 @@ pub const CacheManager = struct {
             const label = try std.fmt.allocPrint(self.allocator, "Steam AppID {s}", .{entry.name});
             errdefer self.allocator.free(label);
 
+            const modified_time = timestampToNanoseconds(stat.mtime);
+
             try self.entries.append(self.allocator, CacheEntry{
                 .path = app_path,
                 .cache_type = .fossilize,
                 .size_bytes = size,
-                .modified_time = stat.mtime,
+                .modified_time = modified_time,
                 .game_name = label,
+                .game_id = null,
+                .game_source = null,
                 .entry_count = count,
                 .is_directory = true,
                 .allocator = self.allocator,
             });
+        }
+    }
+
+    pub fn associateGames(self: *CacheManager, catalog: *const games.GameCatalog) !void {
+        for (self.entries.items) |*entry| {
+            if (entry.game_id) |id| {
+                if (findGameById(catalog, id)) |game| {
+                    try entry.assignGame(game);
+                    continue;
+                }
+            }
+
+            var matched: ?*const games.Game = null;
+
+            if (entry.game_name) |name| {
+                matched = findGameByName(catalog, name);
+            }
+
+            if (matched == null) {
+                matched = findGameByHints(catalog, entry.path);
+            }
+
+            if (matched) |game| {
+                try entry.assignGame(game);
+            }
         }
     }
 
@@ -497,7 +588,7 @@ pub const CacheManager = struct {
         const seconds_per_day: i128 = 24 * 60 * 60;
         const ns_per_s_i128: i128 = @intCast(std.time.ns_per_s);
         const days_i128: i128 = @intCast(days);
-        const cutoff_ns = std.time.nanoTimestamp() - (days_i128 * seconds_per_day * ns_per_s_i128);
+        const cutoff_ns = nowNanoseconds() - (days_i128 * seconds_per_day * ns_per_s_i128);
 
         var removed: u32 = 0;
         var i: usize = 0;
@@ -572,12 +663,127 @@ pub const CacheManager = struct {
     }
 };
 
+fn findGameById(catalog: *const games.GameCatalog, id: []const u8) ?*const games.Game {
+    for (catalog.games.items) |*game| {
+        if (mem.eql(u8, game.id, id)) return game;
+    }
+    return null;
+}
+
+fn findGameByName(catalog: *const games.GameCatalog, name: []const u8) ?*const games.Game {
+    for (catalog.games.items) |*game| {
+        if (std.ascii.eqlIgnoreCase(game.name, name)) return game;
+    }
+
+    for (catalog.games.items) |*game| {
+        if (containsIgnoreCase(name, game.name)) return game;
+    }
+
+    return null;
+}
+
+fn findGameByHints(catalog: *const games.GameCatalog, entry_path: []const u8) ?*const games.Game {
+    var best: ?*const games.Game = null;
+    var best_score: usize = 0;
+
+    for (catalog.games.items) |*game| {
+        for (game.cache_paths.items) |hint| {
+            const score = hintMatchScore(entry_path, hint);
+            if (score > best_score) {
+                best = game;
+                best_score = score;
+            }
+        }
+
+        const install_score = hintMatchScore(entry_path, game.install_path);
+        if (install_score > best_score) {
+            best = game;
+            best_score = install_score;
+        }
+
+        const steam_score = steamMatchScore(entry_path, game);
+        if (steam_score > best_score) {
+            best = game;
+            best_score = steam_score;
+        }
+    }
+
+    return best;
+}
+
+fn hintMatchScore(entry_path: []const u8, raw_hint: []const u8) usize {
+    const hint = trimTrailingSeparators(raw_hint);
+    if (hint.len == 0 or hint.len > entry_path.len) return 0;
+    if (!mem.startsWith(u8, entry_path, hint)) return 0;
+    if (entry_path.len == hint.len) return hint.len;
+    const next = entry_path[hint.len];
+    if (!isPathSeparator(next)) return 0;
+    return hint.len;
+}
+
+fn trimTrailingSeparators(value: []const u8) []const u8 {
+    var end = value.len;
+    while (end > 0) : (end -= 1) {
+        const ch = value[end - 1];
+        if (!(ch == '/' or ch == '\\')) break;
+    }
+    return value[0..end];
+}
+
+fn steamMatchScore(entry_path: []const u8, game: *const games.Game) usize {
+    if (game.source != .steam) return 0;
+    const sep = mem.indexOfScalar(u8, game.id, ':') orelse return 0;
+    if (sep + 1 >= game.id.len) return 0;
+    const app_id = game.id[sep + 1 ..];
+    if (pathContainsSegment(entry_path, app_id)) {
+        return app_id.len;
+    }
+    return 0;
+}
+
+fn pathContainsSegment(path: []const u8, segment: []const u8) bool {
+    if (segment.len == 0 or segment.len > path.len) return false;
+    var idx: usize = 0;
+    const limit = path.len - segment.len;
+    while (idx <= limit) : (idx += 1) {
+        if (!mem.eql(u8, path[idx .. idx + segment.len], segment)) continue;
+        const before_ok = idx == 0 or isPathSeparator(path[idx - 1]);
+        const after_index = idx + segment.len;
+        const after_ok = after_index == path.len or isPathSeparator(path[after_index]);
+        if (before_ok and after_ok) return true;
+    }
+    return false;
+}
+
+fn isPathSeparator(ch: u8) bool {
+    return ch == '/' or ch == '\\';
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var offset: usize = 0;
+    const limit = haystack.len - needle.len;
+    while (offset <= limit) : (offset += 1) {
+        var matched = true;
+        var i: usize = 0;
+        while (i < needle.len) : (i += 1) {
+            if (std.ascii.toLower(haystack[offset + i]) != std.ascii.toLower(needle[i])) {
+                matched = false;
+                break;
+            }
+        }
+        if (matched) return true;
+    }
+    return false;
+}
+
 fn validateDxvkFile(path: []const u8) !DxvkValidationResult {
     const file = try fs.cwd().openFile(path, .{});
     defer file.close();
 
     var header: DxvkCacheHeader = undefined;
-    try file.readNoEof(std.mem.asBytes(&header));
+    try readAllExact(file, std.mem.asBytes(&header));
 
     if (!mem.eql(u8, &header.magic, "DXVK")) return error.InvalidCacheFile;
     if (header.entry_size == 0) return error.InvalidCacheFile;
@@ -589,6 +795,19 @@ fn validateDxvkFile(path: []const u8) !DxvkValidationResult {
     if (payload_size % header.entry_size != 0) return error.InvalidCacheFile;
 
     return .{ .header = header, .payload_size = payload_size };
+}
+
+fn timestampToNanoseconds(ts: std.Io.Timestamp) i128 {
+    return ts.toNanoseconds();
+}
+
+fn readAllExact(file: fs.File, buffer: []u8) !void {
+    var filled: usize = 0;
+    while (filled < buffer.len) {
+        const got = try file.read(buffer[filled..]);
+        if (got == 0) return error.UnexpectedEof;
+        filled += got;
+    }
 }
 
 fn deletePath(path_str: []const u8, is_directory: bool) void {
