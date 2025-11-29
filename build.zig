@@ -4,6 +4,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Export the library module for consumers
+    _ = b.addModule("nvshader", .{
+        .root_source_file = b.path("src/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // CLI executable
     const exe_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
