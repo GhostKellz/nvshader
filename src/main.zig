@@ -40,6 +40,10 @@ pub fn main() !void {
         return commandSteam(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "daemon")) {
         return commandDaemon(allocator);
+    } else if (std.mem.eql(u8, command, "p2p")) {
+        return commandP2P(allocator, args[2..]);
+    } else if (std.mem.eql(u8, command, "share")) {
+        return commandShare(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "json")) {
         return commandJson(allocator, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
@@ -638,6 +642,237 @@ fn commandDaemon(allocator: std.mem.Allocator) void {
     }
 }
 
+const p2p = @import("p2p.zig");
+
+fn commandP2P(allocator: std.mem.Allocator, args: [][:0]u8) void {
+    var subcommand: []const u8 = "status";
+    if (args.len > 0) {
+        subcommand = args[0];
+    }
+
+    if (std.mem.eql(u8, subcommand, "status")) {
+        p2pStatus(allocator);
+    } else if (std.mem.eql(u8, subcommand, "daemon")) {
+        p2pDaemon(allocator);
+    } else if (std.mem.eql(u8, subcommand, "discover")) {
+        p2pDiscover(allocator);
+    } else if (std.mem.eql(u8, subcommand, "query")) {
+        if (args.len > 1) {
+            p2pQuery(allocator, args[1]);
+        } else {
+            std.debug.print("Usage: nvshader p2p query <game_id>\n", .{});
+        }
+    } else {
+        std.debug.print("Unknown p2p subcommand: {s}\n", .{subcommand});
+        std.debug.print("Available: status, daemon, discover, query <game_id>\n", .{});
+    }
+}
+
+fn p2pStatus(allocator: std.mem.Allocator) void {
+    std.debug.print("\nP2P Shader Cache Sharing\n", .{});
+    std.debug.print("========================\n\n", .{});
+
+    // Show current configuration
+    std.debug.print("Discovery Port: {d}\n", .{p2p.DISCOVERY_PORT});
+    std.debug.print("Transfer Port: {d}\n", .{p2p.TRANSFER_PORT});
+    std.debug.print("Multicast Group: {s}\n\n", .{p2p.MULTICAST_GROUP});
+
+    // Try to detect GPU for compatibility info
+    var profile = nvshader.sharing.GpuProfile.detect(allocator) catch {
+        std.debug.print("GPU: Unknown\n", .{});
+        return;
+    };
+    defer profile.deinit();
+
+    std.debug.print("Local GPU: {s}\n", .{profile.architecture});
+    std.debug.print("Driver: {s}\n", .{profile.driver_version});
+
+    // Show local caches available for sharing
+    var manager = nvshader.cache.CacheManager.init(allocator) catch return;
+    defer manager.deinit();
+    manager.scan() catch return;
+
+    var fossilize_count: usize = 0;
+    var fossilize_size: u64 = 0;
+    for (manager.entries.items) |entry| {
+        if (entry.cache_type == .fossilize) {
+            fossilize_count += 1;
+            fossilize_size += entry.size_bytes;
+        }
+    }
+
+    const size_mb = @as(f64, @floatFromInt(fossilize_size)) / (1024 * 1024);
+    std.debug.print("\nShareable Caches: {d} ({d:.2} MB)\n", .{ fossilize_count, size_mb });
+}
+
+fn p2pDaemon(allocator: std.mem.Allocator) void {
+    std.debug.print("Starting P2P daemon...\n", .{});
+
+    var daemon = p2p.P2PDaemon.init(allocator) catch {
+        std.debug.print("Failed to initialize P2P daemon\n", .{});
+        return;
+    };
+    defer daemon.deinit();
+
+    // Register local caches for sharing
+    var manager = nvshader.cache.CacheManager.init(allocator) catch return;
+    defer manager.deinit();
+    manager.scan() catch {};
+
+    for (manager.entries.items) |entry| {
+        if (entry.cache_type == .fossilize) {
+            daemon.node.addLocalCache(
+                entry.game_id orelse "unknown",
+                entry.game_name orelse "Unknown Game",
+                entry.cache_type,
+                entry.path,
+            ) catch continue;
+        }
+    }
+
+    std.debug.print("Registered {d} caches for sharing\n", .{daemon.node.local_caches.items.len});
+
+    daemon.run() catch |err| {
+        std.debug.print("P2P daemon error: {any}\n", .{err});
+    };
+}
+
+fn p2pDiscover(allocator: std.mem.Allocator) void {
+    std.debug.print("Scanning for P2P peers...\n\n", .{});
+
+    var node = p2p.P2PNode.init(allocator) catch {
+        std.debug.print("Failed to initialize P2P node\n", .{});
+        return;
+    };
+    defer node.deinit();
+
+    node.start() catch {
+        std.debug.print("Failed to start P2P node\n", .{});
+        return;
+    };
+
+    // Poll for a few seconds to discover peers
+    var iterations: usize = 0;
+    while (iterations < 50) { // ~5 seconds
+        if (node.pollDiscovery() catch null) |event| {
+            switch (event) {
+                .peer_announce => |info| {
+                    std.debug.print("Found peer: {s} ({s}, {d} caches)\n", .{
+                        info.hostname, info.arch, info.cache_count,
+                    });
+                },
+                .cache_offer => |offer| {
+                    std.debug.print("  Offers: {s} ({d} bytes)\n", .{
+                        offer.game_name, offer.size,
+                    });
+                },
+                else => {},
+            }
+        }
+        std.posix.nanosleep(0, 100_000_000);
+        iterations += 1;
+    }
+
+    const peers = node.getPeers();
+    std.debug.print("\nDiscovered {d} peers\n", .{peers.len});
+}
+
+fn p2pQuery(allocator: std.mem.Allocator, game_id: []const u8) void {
+    std.debug.print("Querying network for caches of: {s}\n\n", .{game_id});
+
+    var node = p2p.P2PNode.init(allocator) catch {
+        std.debug.print("Failed to initialize P2P node\n", .{});
+        return;
+    };
+    defer node.deinit();
+
+    node.start() catch {
+        std.debug.print("Failed to start P2P node\n", .{});
+        return;
+    };
+
+    node.queryForGame(game_id) catch {
+        std.debug.print("Failed to send query\n", .{});
+        return;
+    };
+
+    // Wait for responses
+    var offers_found: usize = 0;
+    var iterations: usize = 0;
+    while (iterations < 50) { // ~5 seconds
+        if (node.pollDiscovery() catch null) |event| {
+            switch (event) {
+                .cache_offer => |offer| {
+                    offers_found += 1;
+                    std.debug.print("Found: {s} ({d:.2} MB) on port {d}\n", .{
+                        offer.game_name,
+                        @as(f64, @floatFromInt(offer.size)) / (1024 * 1024),
+                        offer.port,
+                    });
+                },
+                else => {},
+            }
+        }
+        std.posix.nanosleep(0, 100_000_000);
+        iterations += 1;
+    }
+
+    if (offers_found == 0) {
+        std.debug.print("No caches found for this game on the network\n", .{});
+    } else {
+        std.debug.print("\nFound {d} available caches\n", .{offers_found});
+    }
+}
+
+fn commandShare(allocator: std.mem.Allocator, args: [][:0]u8) void {
+    if (args.len < 1) {
+        std.debug.print("Usage: nvshader share <game_name|game_id>\n", .{});
+        std.debug.print("\nShares a game's shader cache with the P2P network.\n", .{});
+        std.debug.print("Run 'nvshader p2p daemon' first to enable sharing.\n", .{});
+        return;
+    }
+
+    const game_query = args[0];
+
+    // Find the game
+    var catalog = nvshader.games.GameCatalog.init(allocator);
+    defer catalog.deinit();
+    catalog.detectAll() catch {
+        std.debug.print("Failed to detect games\n", .{});
+        return;
+    };
+
+    var found_game: ?*const nvshader.games.Game = null;
+    for (catalog.games.items) |*game| {
+        if (std.mem.indexOf(u8, game.name, game_query) != null or
+            std.mem.eql(u8, game.id, game_query))
+        {
+            found_game = game;
+            break;
+        }
+    }
+
+    if (found_game) |game| {
+        std.debug.print("Sharing caches for: {s}\n", .{game.name});
+        std.debug.print("  ID: {s}\n", .{game.id});
+        std.debug.print("  Cache paths: {d}\n\n", .{game.cache_paths.items.len});
+
+        // Get total size
+        var total_size: u64 = 0;
+        for (game.cache_paths.items) |path| {
+            const stat = std.fs.cwd().statFile(path) catch continue;
+            total_size += stat.size;
+        }
+
+        const size_mb = @as(f64, @floatFromInt(total_size)) / (1024 * 1024);
+        std.debug.print("Total shareable: {d:.2} MB\n", .{size_mb});
+        std.debug.print("\nTo share, run: nvshader p2p daemon\n", .{});
+    } else {
+        std.debug.print("Game not found: {s}\n", .{game_query});
+        std.debug.print("Use 'nvshader games' to list available games.\n", .{});
+    }
+}
+
 fn commandJson(allocator: std.mem.Allocator, args: [][:0]u8) void {
     var subcommand: []const u8 = "status";
     if (args.len > 0) {
@@ -797,6 +1032,12 @@ fn printUsage() void {
         \\     steam            Steam info as JSON
         \\     games            Games list as JSON
         \\  daemon              Start IPC daemon for nvcontrol integration
+        \\  p2p [subcommand]    Peer-to-peer cache sharing (LAN)
+        \\     status           Show P2P configuration and local caches
+        \\     daemon           Start P2P daemon for sharing
+        \\     discover         Scan for peers on the network
+        \\     query <game_id>  Query network for a game's caches
+        \\  share <game>        Show shareable caches for a game
         \\  help                Print this message
         \\  version             Show version
         \\

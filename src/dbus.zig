@@ -106,8 +106,10 @@ pub const IpcServer = struct {
         const SOCK_NONBLOCK: u32 = 0x800;
         const SOCK_CLOEXEC: u32 = 0x80000;
         const result = std.os.linux.accept4(sock, null, null, SOCK_NONBLOCK | SOCK_CLOEXEC);
-        const errno = std.os.linux.E.init(result);
-        if (errno != .SUCCESS) {
+
+        // Check for error - negative results or high values indicate errno
+        const signed_result: isize = @bitCast(result);
+        if (signed_result < 0) {
             // Non-blocking accept - EAGAIN/EWOULDBLOCK means no pending connections
             return;
         }
