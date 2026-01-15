@@ -1,11 +1,18 @@
 const std = @import("std");
-const fs = std.fs;
 const mem = std.mem;
 const math = std.math;
 const path_util = std.fs.path;
 const paths = @import("paths.zig");
 const types = @import("types.zig");
 const games = @import("games.zig");
+
+const Io = std.Io;
+const Dir = std.Io.Dir;
+
+/// Get the global debug Io instance for file operations
+fn getIo() Io {
+    return std.Options.debug_io;
+}
 
 fn nowNanoseconds() i128 {
     const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
@@ -26,16 +33,19 @@ pub const DxvkStateCache = struct {
     payload: []u8,
 
     pub fn read(allocator: mem.Allocator, path: []const u8) !DxvkStateCache {
-        const file = try fs.cwd().openFile(path, .{});
-        defer file.close();
+        const io = getIo();
+        const file = try Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
 
         var header: DxvkCacheHeader = undefined;
-        try readAllExact(file, std.mem.asBytes(&header));
+        const header_bytes = std.mem.asBytes(&header);
+        const header_read = try file.readPositionalAll(io, header_bytes, 0);
+        if (header_read < header_bytes.len) return error.InvalidCacheFile;
 
         if (!mem.eql(u8, &header.magic, "DXVK")) return error.InvalidCacheFile;
         if (header.entry_size == 0) return error.InvalidCacheFile;
 
-        const stat = try file.stat();
+        const stat = try file.stat(io);
         if (stat.size < @sizeOf(DxvkCacheHeader)) return error.InvalidCacheFile;
 
         const payload_size_u64 = stat.size - @sizeOf(DxvkCacheHeader);
@@ -46,7 +56,11 @@ pub const DxvkStateCache = struct {
         const payload = try allocator.alloc(u8, payload_len);
         errdefer allocator.free(payload);
 
-        try readAllExact(file, payload);
+        const payload_read = try file.readPositionalAll(io, payload, @sizeOf(DxvkCacheHeader));
+        if (payload_read < payload_len) {
+            allocator.free(payload);
+            return error.InvalidCacheFile;
+        }
 
         return DxvkStateCache{
             .allocator = allocator,
@@ -66,15 +80,16 @@ pub const DxvkStateCache = struct {
     }
 
     pub fn write(self: *const DxvkStateCache, path: []const u8) !void {
+        const io = getIo();
         if (self.header.entry_size == 0) return error.InvalidCacheFile;
         const entry_size_usize: usize = @intCast(self.header.entry_size);
         if (self.payload.len % entry_size_usize != 0) return error.InvalidCacheFile;
 
-        const file = try fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
+        const file = try Dir.cwd().createFile(io, path, .{ .truncate = true });
+        defer file.close(io);
 
-        try file.writeAll(std.mem.asBytes(&self.header));
-        try file.writeAll(self.payload);
+        try file.writeAll(io, std.mem.asBytes(&self.header));
+        try file.writeAll(io, self.payload);
     }
 };
 
@@ -200,16 +215,17 @@ pub const CacheManager = struct {
     }
 
     fn scanDxvkCaches(self: *CacheManager, base_path: []const u8) !void {
-        var dir = fs.cwd().openDir(base_path, .{ .iterate = true }) catch return;
-        defer dir.close();
+        const io = getIo();
+        var dir = Dir.cwd().openDir(io, base_path, .{ .iterate = true }) catch return;
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(io)) |entry| {
             if (entry.kind == .file and mem.endsWith(u8, entry.name, ".dxvk-cache")) {
                 const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ base_path, entry.name });
                 errdefer self.allocator.free(full_path);
 
-                const stat = dir.statFile(entry.name) catch {
+                const stat = dir.statFile(io, entry.name, .{}) catch {
                     self.allocator.free(full_path);
                     continue;
                 };
@@ -241,16 +257,17 @@ pub const CacheManager = struct {
     }
 
     fn scanVkd3dCaches(self: *CacheManager, base_path: []const u8) !void {
-        var dir = fs.cwd().openDir(base_path, .{ .iterate = true }) catch return;
-        defer dir.close();
+        const io = getIo();
+        var dir = Dir.cwd().openDir(io, base_path, .{ .iterate = true }) catch return;
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(io)) |entry| {
             if (entry.kind == .file and mem.endsWith(u8, entry.name, ".dxvk-cache")) {
                 const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ base_path, entry.name });
                 errdefer self.allocator.free(full_path);
 
-                const stat = dir.statFile(entry.name) catch {
+                const stat = dir.statFile(io, entry.name, .{}) catch {
                     self.allocator.free(full_path);
                     continue;
                 };
@@ -282,11 +299,12 @@ pub const CacheManager = struct {
     }
 
     fn scanFossilizeCaches(self: *CacheManager, base_path: []const u8) !void {
-        var dir = fs.cwd().openDir(base_path, .{ .iterate = true }) catch return;
-        defer dir.close();
+        const io = getIo();
+        var dir = Dir.cwd().openDir(io, base_path, .{ .iterate = true }) catch return;
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(io)) |entry| {
             switch (entry.kind) {
                 .file => {
                     if (!mem.endsWith(u8, entry.name, ".foz")) continue;
@@ -294,7 +312,7 @@ pub const CacheManager = struct {
                     const full_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ base_path, entry.name });
                     errdefer self.allocator.free(full_path);
 
-                    const stat = dir.statFile(entry.name) catch {
+                    const stat = dir.statFile(io, entry.name, .{}) catch {
                         self.allocator.free(full_path);
                         continue;
                     };
@@ -321,7 +339,7 @@ pub const CacheManager = struct {
                     const dir_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ base_path, entry.name });
                     errdefer self.allocator.free(dir_path);
 
-                    const stat = dir.statFile(entry.name) catch {
+                    const stat = dir.statFile(io, entry.name, .{}) catch {
                         self.allocator.free(dir_path);
                         continue;
                     };
@@ -359,19 +377,20 @@ pub const CacheManager = struct {
     }
 
     fn scanNvidiaCache(self: *CacheManager, base_path: []const u8) !void {
-        var dir = fs.cwd().openDir(base_path, .{ .iterate = true }) catch return;
-        defer dir.close();
+        const io = getIo();
+        var dir = Dir.cwd().openDir(io, base_path, .{ .iterate = true }) catch return;
+        defer dir.close(io);
 
         var iter = dir.iterate();
         var found_any = false;
 
-        while (try iter.next()) |entry| {
+        while (try iter.next(io)) |entry| {
             if (entry.kind != .directory) continue;
 
             const sub_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ base_path, entry.name });
             errdefer self.allocator.free(sub_path);
 
-            const stat = dir.statFile(entry.name) catch {
+            const stat = dir.statFile(io, entry.name, .{}) catch {
                 self.allocator.free(sub_path);
                 continue;
             };
@@ -411,9 +430,9 @@ pub const CacheManager = struct {
             if (size == 0) return;
             const count = paths.countFiles(self.allocator, base_path) catch 0;
             const mtime = blk: {
-                var dir_stat = fs.openDirAbsolute(base_path, .{}) catch break :blk nowNanoseconds();
-                defer dir_stat.close();
-                const status = dir_stat.stat() catch break :blk nowNanoseconds();
+                var dir_stat = Dir.openDirAbsolute(io, base_path, .{}) catch break :blk nowNanoseconds();
+                defer dir_stat.close(io);
+                const status = dir_stat.stat(io) catch break :blk nowNanoseconds();
                 break :blk timestampToNanoseconds(status.mtime);
             };
 
@@ -433,14 +452,15 @@ pub const CacheManager = struct {
     }
 
     fn scanMesaCache(self: *CacheManager, base_path: []const u8) !void {
+        const io = getIo();
         const size = paths.getDirSize(self.allocator, base_path) catch 0;
         if (size == 0) return;
 
         const count = paths.countFiles(self.allocator, base_path) catch 0;
         const mtime = blk: {
-            var dir_stat = fs.openDirAbsolute(base_path, .{}) catch break :blk nowNanoseconds();
-            defer dir_stat.close();
-            const status = dir_stat.stat() catch break :blk nowNanoseconds();
+            var dir_stat = Dir.openDirAbsolute(io, base_path, .{}) catch break :blk nowNanoseconds();
+            defer dir_stat.close(io);
+            const status = dir_stat.stat(io) catch break :blk nowNanoseconds();
             break :blk timestampToNanoseconds(status.mtime);
         };
 
@@ -459,17 +479,18 @@ pub const CacheManager = struct {
     }
 
     fn scanSteamShaderCache(self: *CacheManager, base_path: []const u8) !void {
-        var dir = fs.cwd().openDir(base_path, .{ .iterate = true }) catch return;
-        defer dir.close();
+        const io = getIo();
+        var dir = Dir.cwd().openDir(io, base_path, .{ .iterate = true }) catch return;
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(io)) |entry| {
             if (entry.kind != .directory) continue;
 
             const app_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ base_path, entry.name });
             errdefer self.allocator.free(app_path);
 
-            const stat = dir.statFile(entry.name) catch {
+            const stat = dir.statFile(io, entry.name, .{}) catch {
                 self.allocator.free(app_path);
                 continue;
             };
@@ -779,16 +800,19 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
 }
 
 fn validateDxvkFile(path: []const u8) !DxvkValidationResult {
-    const file = try fs.cwd().openFile(path, .{});
-    defer file.close();
+    const io = getIo();
+    const file = try Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
 
     var header: DxvkCacheHeader = undefined;
-    try readAllExact(file, std.mem.asBytes(&header));
+    const header_bytes = std.mem.asBytes(&header);
+    const header_read = try file.readPositionalAll(io, header_bytes, 0);
+    if (header_read < header_bytes.len) return error.InvalidCacheFile;
 
     if (!mem.eql(u8, &header.magic, "DXVK")) return error.InvalidCacheFile;
     if (header.entry_size == 0) return error.InvalidCacheFile;
 
-    const stat = try file.stat();
+    const stat = try file.stat(io);
     if (stat.size < @sizeOf(DxvkCacheHeader)) return error.InvalidCacheFile;
     const payload_size = stat.size - @sizeOf(DxvkCacheHeader);
 
@@ -801,38 +825,30 @@ fn timestampToNanoseconds(ts: std.Io.Timestamp) i128 {
     return ts.toNanoseconds();
 }
 
-fn readAllExact(file: fs.File, buffer: []u8) !void {
-    var filled: usize = 0;
-    while (filled < buffer.len) {
-        const got = try file.read(buffer[filled..]);
-        if (got == 0) return error.UnexpectedEof;
-        filled += got;
-    }
-}
-
 fn deletePath(path_str: []const u8, is_directory: bool) void {
+    const io = getIo();
     if (path_util.isAbsolute(path_str)) {
         const dir_path = path_util.dirname(path_str) orelse path_str;
         const base_name = path_util.basename(path_str);
-        var dir = std.fs.openDirAbsolute(dir_path, .{}) catch return;
-        defer dir.close();
+        var dir = Dir.openDirAbsolute(io, dir_path, .{}) catch return;
+        defer dir.close(io);
 
         if (is_directory) {
-            dir.deleteTree(base_name) catch {};
+            dir.deleteTree(io, base_name) catch {};
         } else {
-            dir.deleteFile(base_name) catch {};
+            dir.deleteFile(io, base_name) catch {};
         }
     } else {
         if (is_directory) {
-            fs.cwd().deleteTree(path_str) catch {};
+            Dir.cwd().deleteTree(io, path_str) catch {};
         } else {
-            fs.cwd().deleteFile(path_str) catch {};
+            Dir.cwd().deleteFile(io, path_str) catch {};
         }
     }
 }
 
 fn pathExists(path_str: []const u8) bool {
-    fs.cwd().access(path_str, .{}) catch return false;
+    Dir.cwd().access(getIo(), path_str, .{}) catch return false;
     return true;
 }
 

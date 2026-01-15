@@ -185,7 +185,7 @@ zig build test
 
 ```
 +--------------------------------------------------------+
-|                      nvshader v0.1.0                     |
+|                      nvshader v0.1.1                     |
 +------------+------------+------------+-----------------+
 |   cache    |  prewarm   |   watch    |     steam       |
 |  (manager) | (fossilize)|  (inotify) |   (integration) |

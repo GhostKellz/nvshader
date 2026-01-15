@@ -10,12 +10,28 @@
 
 const std = @import("std");
 const posix = std.posix;
-const fs = std.fs;
 const mem = std.mem;
 const json = std.json;
 
 const sharing = @import("sharing.zig");
 const types = @import("types.zig");
+
+const Io = std.Io;
+const Dir = std.Io.Dir;
+
+/// Get the global debug Io instance for file operations
+fn getIo() Io {
+    return std.Options.debug_io;
+}
+
+/// Get environment variable using libc
+fn getEnv(name: [*:0]const u8) ?[]const u8 {
+    const result = std.c.getenv(name);
+    if (result) |ptr| {
+        return std.mem.sliceTo(ptr, 0);
+    }
+    return null;
+}
 
 /// Default ports
 pub const DISCOVERY_PORT: u16 = 34789;
@@ -64,8 +80,19 @@ pub const PeerInfo = struct {
 };
 
 /// IPv4 sockaddr structure
+const AF_INET: u16 = 2;
+const SOCK_DGRAM: u32 = 2;
+const SOCK_STREAM: u32 = 1;
+const SOCK_CLOEXEC: u32 = 0x80000;
+const SOCK_NONBLOCK: u32 = 0x800;
+const SOL_SOCKET: u32 = 1;
+const SO_REUSEADDR: u32 = 2;
+const IPPROTO_IP: u32 = 0;
+const IP_ADD_MEMBERSHIP: u32 = 35;
+const MSG_DONTWAIT: u32 = 0x40;
+
 const sockaddr_in = extern struct {
-    family: u16 = posix.AF.INET,
+    family: u16 = AF_INET,
     port: u16, // Big-endian
     addr: [4]u8,
     zero: [8]u8 = .{ 0, 0, 0, 0, 0, 0, 0, 0 },
@@ -143,27 +170,35 @@ pub const P2PNode = struct {
         if (self.running) return;
 
         // Create UDP socket for discovery (multicast)
-        self.discovery_socket = try posix.socket(posix.AF.INET, posix.SOCK.DGRAM, 0);
+        const udp_result = std.os.linux.socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+        const udp_signed: isize = @bitCast(udp_result);
+        if (udp_signed < 0) return error.SocketCreateFailed;
+        self.discovery_socket = @intCast(udp_result);
 
         // Enable address reuse
         const opt_val: u32 = 1;
-        try posix.setsockopt(
-            self.discovery_socket.?,
-            posix.SOL.SOCKET,
-            posix.SO.REUSEADDR,
+        const setsockopt_result1 = std.os.linux.setsockopt(
+            @intCast(self.discovery_socket.?),
+            SOL_SOCKET,
+            SO_REUSEADDR,
             std.mem.asBytes(&opt_val),
+            @sizeOf(@TypeOf(opt_val)),
         );
+        const setsockopt_signed1: isize = @bitCast(setsockopt_result1);
+        if (setsockopt_signed1 < 0) return error.SetSockOptFailed;
 
         // Bind to discovery port
         var bind_addr = sockaddr_in{
             .port = mem.nativeToBig(u16, DISCOVERY_PORT),
             .addr = .{ 0, 0, 0, 0 },
         };
-        try posix.bind(
-            self.discovery_socket.?,
+        const bind_result1 = std.os.linux.bind(
+            @intCast(self.discovery_socket.?),
             @ptrCast(&bind_addr),
             @sizeOf(sockaddr_in),
         );
+        const bind_signed1: isize = @bitCast(bind_result1);
+        if (bind_signed1 < 0) return error.BindFailed;
 
         // Join multicast group
         const mcast_addr = try parseIp4(MULTICAST_GROUP);
@@ -172,33 +207,47 @@ pub const P2PNode = struct {
             .interface_addr = .{ 0, 0, 0, 0 },
         };
 
-        try posix.setsockopt(
-            self.discovery_socket.?,
-            posix.IPPROTO.IP,
-            12, // IP_ADD_MEMBERSHIP
+        const setsockopt_result2 = std.os.linux.setsockopt(
+            @intCast(self.discovery_socket.?),
+            IPPROTO_IP,
+            IP_ADD_MEMBERSHIP,
             std.mem.asBytes(&mreq),
+            @sizeOf(ip_mreq),
         );
+        const setsockopt_signed2: isize = @bitCast(setsockopt_result2);
+        if (setsockopt_signed2 < 0) return error.SetSockOptFailed;
 
         // Create TCP socket for transfers
-        self.transfer_socket = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+        const tcp_result = std.os.linux.socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        const tcp_signed: isize = @bitCast(tcp_result);
+        if (tcp_signed < 0) return error.SocketCreateFailed;
+        self.transfer_socket = @intCast(tcp_result);
 
-        try posix.setsockopt(
-            self.transfer_socket.?,
-            posix.SOL.SOCKET,
-            posix.SO.REUSEADDR,
+        const setsockopt_result3 = std.os.linux.setsockopt(
+            @intCast(self.transfer_socket.?),
+            SOL_SOCKET,
+            SO_REUSEADDR,
             std.mem.asBytes(&opt_val),
+            @sizeOf(@TypeOf(opt_val)),
         );
+        const setsockopt_signed3: isize = @bitCast(setsockopt_result3);
+        if (setsockopt_signed3 < 0) return error.SetSockOptFailed;
 
         var tcp_addr = sockaddr_in{
             .port = mem.nativeToBig(u16, self.port),
             .addr = .{ 0, 0, 0, 0 },
         };
-        try posix.bind(
-            self.transfer_socket.?,
+        const bind_result2 = std.os.linux.bind(
+            @intCast(self.transfer_socket.?),
             @ptrCast(&tcp_addr),
             @sizeOf(sockaddr_in),
         );
-        try posix.listen(self.transfer_socket.?, 5);
+        const bind_signed2: isize = @bitCast(bind_result2);
+        if (bind_signed2 < 0) return error.BindFailed;
+
+        const listen_result = std.os.linux.listen(@intCast(self.transfer_socket.?), 5);
+        const listen_signed: isize = @bitCast(listen_result);
+        if (listen_signed < 0) return error.ListenFailed;
 
         self.running = true;
 
@@ -234,7 +283,7 @@ pub const P2PNode = struct {
         pos += (std.fmt.bufPrint(msg_buf[pos..], "NVCACHE\x01", .{}) catch return).len;
 
         // Add JSON payload
-        const hostname = posix.getenv("HOSTNAME") orelse "unknown";
+        const hostname = getEnv("HOSTNAME") orelse "unknown";
         pos += (std.fmt.bufPrint(
             msg_buf[pos..],
             "{{\"type\":\"announce\",\"hostname\":\"{s}\",\"port\":{d},\"arch\":\"{s}\",\"driver\":\"{s}\",\"caches\":{d}}}",
@@ -247,13 +296,14 @@ pub const P2PNode = struct {
             .port = mem.nativeToBig(u16, DISCOVERY_PORT),
             .addr = mcast_addr,
         };
-        _ = posix.sendto(
-            self.discovery_socket.?,
-            msg_buf[0..pos],
+        _ = std.os.linux.sendto(
+            @intCast(self.discovery_socket.?),
+            &msg_buf,
+            pos,
             0,
             @ptrCast(&dest),
             @sizeOf(sockaddr_in),
-        ) catch {};
+        );
 
         self.last_announce = getTimestamp();
     }
@@ -267,7 +317,8 @@ pub const P2PNode = struct {
         path: []const u8,
     ) !void {
         // Get size
-        const stat = fs.cwd().statFile(path) catch return error.FileNotFound;
+        const io = getIo();
+        const stat = Dir.cwd().statFile(io, path, .{}) catch return error.FileNotFound;
 
         try self.local_caches.append(self.allocator, .{
             .game_id = try self.allocator.dupe(u8, game_id),
@@ -283,24 +334,25 @@ pub const P2PNode = struct {
         if (!self.running or self.discovery_socket == null) return;
 
         var msg_buf: [512]u8 = undefined;
-        const len = try std.fmt.bufPrint(
+        const len = std.fmt.bufPrint(
             &msg_buf,
             "NVCACHE\x02{{\"type\":\"query\",\"game_id\":\"{s}\",\"arch\":\"{s}\"}}",
             .{ game_id, self.gpu_profile.architecture },
-        );
+        ) catch return;
 
         const mcast_addr = try parseIp4(MULTICAST_GROUP);
         var dest = sockaddr_in{
             .port = mem.nativeToBig(u16, DISCOVERY_PORT),
             .addr = mcast_addr,
         };
-        _ = posix.sendto(
-            self.discovery_socket.?,
-            len,
+        _ = std.os.linux.sendto(
+            @intCast(self.discovery_socket.?),
+            &msg_buf,
+            len.len,
             0,
             @ptrCast(&dest),
             @sizeOf(sockaddr_in),
-        ) catch {};
+        );
     }
 
     /// Process incoming discovery messages
@@ -308,20 +360,21 @@ pub const P2PNode = struct {
         if (!self.running or self.discovery_socket == null) return null;
 
         var buf: [2048]u8 = undefined;
-        var sender: posix.sockaddr = undefined;
-        var sender_len: posix.socklen_t = @sizeOf(posix.sockaddr);
+        var sender: sockaddr_in = undefined;
+        var sender_len: u32 = @sizeOf(sockaddr_in);
 
         // Non-blocking receive
-        const n = posix.recvfrom(
-            self.discovery_socket.?,
+        const recv_result = std.os.linux.recvfrom(
+            @intCast(self.discovery_socket.?),
             &buf,
-            posix.MSG.DONTWAIT,
-            &sender,
+            buf.len,
+            MSG_DONTWAIT,
+            @ptrCast(&sender),
             &sender_len,
-        ) catch |err| switch (err) {
-            error.WouldBlock => return null,
-            else => return err,
-        };
+        );
+        const recv_signed: isize = @bitCast(recv_result);
+        if (recv_signed <= 0) return null;
+        const n: usize = @intCast(recv_result);
 
         if (n < 8) return null;
 
@@ -371,33 +424,45 @@ pub const P2PNode = struct {
         const cache = &self.local_caches.items[cache_idx];
 
         // Connect to peer
-        const sock = try posix.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+        const sock_result = std.os.linux.socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        const sock_signed: isize = @bitCast(sock_result);
+        if (sock_signed < 0) return error.SocketCreateFailed;
+        const sock: i32 = @intCast(sock_result);
         defer posix.close(sock);
 
         var addr = sockaddr_in{
             .port = mem.nativeToBig(u16, peer_port),
             .addr = peer_addr,
         };
-        try posix.connect(sock, @ptrCast(&addr), @sizeOf(sockaddr_in));
+        const connect_result = std.os.linux.connect(sock, @ptrCast(&addr), @sizeOf(sockaddr_in));
+        const connect_signed: isize = @bitCast(connect_result);
+        if (connect_signed < 0) return error.ConnectFailed;
 
         // Send header with metadata
         var header: [256]u8 = undefined;
-        const header_len = try std.fmt.bufPrint(
+        const header_len = std.fmt.bufPrint(
             &header,
             "NVCACHE_TRANSFER\n{s}\n{s}\n{d}\n",
             .{ cache.game_id, cache.game_name, cache.size_bytes },
-        );
-        _ = try posix.send(sock, header_len, 0);
+        ) catch return error.BufferOverflow;
+        const send_result1 = std.os.linux.sendto(sock, &header, header_len.len, 0, null, 0);
+        const send_signed1: isize = @bitCast(send_result1);
+        if (send_signed1 < 0) return error.SendFailed;
 
         // Send file
-        const file = try fs.cwd().openFile(cache.path, .{});
-        defer file.close();
+        const io = getIo();
+        var file = try Dir.cwd().openFile(io, cache.path, .{});
+        defer file.close(io);
 
         var file_buf: [64 * 1024]u8 = undefined;
+        var offset: u64 = 0;
         while (true) {
-            const bytes_read = try file.read(&file_buf);
+            const bytes_read = file.readPositionalAll(io, &file_buf, offset) catch break;
             if (bytes_read == 0) break;
-            _ = try posix.send(sock, file_buf[0..bytes_read], 0);
+            const send_result2 = std.os.linux.sendto(sock, &file_buf, bytes_read, 0, null, 0);
+            const send_signed2: isize = @bitCast(send_result2);
+            if (send_signed2 < 0) return error.SendFailed;
+            offset += bytes_read;
         }
     }
 
@@ -409,6 +474,47 @@ pub const P2PNode = struct {
     /// Get local caches
     pub fn getLocalCaches(self: *const P2PNode) []const LocalCache {
         return self.local_caches.items;
+    }
+
+    /// Respond to a cache query with an offer if we have matching cache
+    pub fn respondToQuery(self: *P2PNode, game_id: []const u8, requester_arch: []const u8) !void {
+        if (!self.running or self.discovery_socket == null) return;
+
+        // Check if architectures are compatible (same GPU arch)
+        if (!mem.eql(u8, requester_arch, self.gpu_profile.architecture)) {
+            // Incompatible GPU architecture, don't offer
+            return;
+        }
+
+        // Find matching cache
+        for (self.local_caches.items) |cache| {
+            if (mem.eql(u8, cache.game_id, game_id)) {
+                // Found matching cache, send offer
+                var msg_buf: [1024]u8 = undefined;
+                const len = std.fmt.bufPrint(
+                    &msg_buf,
+                    "NVCACHE\x03{{\"type\":\"offer\",\"game_id\":\"{s}\",\"game_name\":\"{s}\",\"size\":{d},\"port\":{d}}}",
+                    .{ cache.game_id, cache.game_name, cache.size_bytes, self.port },
+                ) catch return;
+
+                const mcast_addr = try parseIp4(MULTICAST_GROUP);
+                var dest = sockaddr_in{
+                    .port = mem.nativeToBig(u16, DISCOVERY_PORT),
+                    .addr = mcast_addr,
+                };
+                _ = std.os.linux.sendto(
+                    @intCast(self.discovery_socket.?),
+                    &msg_buf,
+                    len.len,
+                    0,
+                    @ptrCast(&dest),
+                    @sizeOf(sockaddr_in),
+                );
+
+                std.debug.print("Sent cache offer for {s} ({d} bytes)\n", .{ cache.game_name, cache.size_bytes });
+                return;
+            }
+        }
     }
 };
 
@@ -484,7 +590,10 @@ pub const P2PDaemon = struct {
                             query.game_id,
                             query.arch,
                         });
-                        // TODO: Respond with offer if we have matching cache
+                        // Respond with offer if we have matching cache
+                        self.node.respondToQuery(query.game_id, query.arch) catch |err| {
+                            std.debug.print("Failed to respond to query: {}\n", .{err});
+                        };
                     },
                     .cache_offer => |offer| {
                         std.debug.print("Cache offer: {s} ({d} bytes)\n", .{
@@ -496,13 +605,14 @@ pub const P2PDaemon = struct {
             }
 
             // Small sleep to avoid busy loop
-            std.posix.nanosleep(0, 10 * std.time.ns_per_ms);
+            var ts = std.os.linux.timespec{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+            _ = std.os.linux.nanosleep(&ts, null);
         }
     }
 };
 
 fn getTimestamp() i64 {
-    const ts = posix.clock_gettime(.REALTIME) catch return 0;
+    const ts = std.posix.clock_gettime(.REALTIME) catch return 0;
     return ts.sec;
 }
 

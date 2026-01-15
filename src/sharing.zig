@@ -6,6 +6,23 @@ const json = std.json;
 const types = @import("types.zig");
 const cache = @import("cache.zig");
 
+const Io = std.Io;
+const Dir = std.Io.Dir;
+
+/// Get the global debug Io instance for file operations
+fn getIo() Io {
+    return std.Options.debug_io;
+}
+
+/// Get environment variable using libc
+fn getEnv(name: [*:0]const u8) ?[]const u8 {
+    const result = std.c.getenv(name);
+    if (result) |ptr| {
+        return std.mem.sliceTo(ptr, 0);
+    }
+    return null;
+}
+
 /// .nvcache package format version
 pub const PackageVersion: u32 = 1;
 
@@ -58,11 +75,12 @@ pub const GpuProfile = struct {
 
     fn detectNvidia(self: *GpuProfile) !void {
         // Read from /proc/driver/nvidia/version
+        const io = getIo();
         const version_path = "/proc/driver/nvidia/version";
-        if (fs.cwd().openFile(version_path, .{})) |file| {
-            defer file.close();
+        if (Dir.cwd().openFile(io, version_path, .{})) |file| {
+            defer file.close(io);
             var buf: [512]u8 = undefined;
-            const len = file.preadAll(&buf, 0) catch 0;
+            const len = file.readPositionalAll(io, &buf, 0) catch 0;
             if (len > 0) {
                 // Parse version from NVRM version line
                 // Format: "NVRM version: NVIDIA UNIX ... xxx.xxx.xx ..."
@@ -91,11 +109,11 @@ pub const GpuProfile = struct {
         // Try to detect architecture from device ID ranges
         // This is a simplified heuristic
         const pci_path = "/sys/bus/pci/devices";
-        var dir = fs.cwd().openDir(pci_path, .{ .iterate = true }) catch return;
-        defer dir.close();
+        var dir = Dir.cwd().openDir(io, pci_path, .{ .iterate = true }) catch return;
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
+        while (iter.next(io) catch null) |entry| {
             // PCI devices are symlinks
             if (entry.kind != .sym_link and entry.kind != .directory) continue;
 
@@ -103,10 +121,10 @@ pub const GpuProfile = struct {
             const vendor_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}/vendor", .{ pci_path, entry.name });
             defer self.allocator.free(vendor_path);
 
-            if (fs.cwd().openFile(vendor_path, .{})) |vfile| {
-                defer vfile.close();
+            if (Dir.cwd().openFile(io, vendor_path, .{})) |vfile| {
+                defer vfile.close(io);
                 var vbuf: [16]u8 = undefined;
-                const vlen = vfile.preadAll(&vbuf, 0) catch 0;
+                const vlen = vfile.readPositionalAll(io, &vbuf, 0) catch 0;
                 if (vlen >= 6) {
                     // Format: 0x10de
                     const vendor_str = mem.trim(u8, vbuf[0..vlen], " \t\r\n");
@@ -117,10 +135,10 @@ pub const GpuProfile = struct {
                         const device_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}/device", .{ pci_path, entry.name });
                         defer self.allocator.free(device_path);
 
-                        if (fs.cwd().openFile(device_path, .{})) |dfile| {
-                            defer dfile.close();
+                        if (Dir.cwd().openFile(io, device_path, .{})) |dfile| {
+                            defer dfile.close(io);
                             var dbuf: [16]u8 = undefined;
-                            const dlen = dfile.preadAll(&dbuf, 0) catch 0;
+                            const dlen = dfile.readPositionalAll(io, &dbuf, 0) catch 0;
                             if (dlen >= 4) {
                                 // Parse 0xNNNN format
                                 const device_str = mem.trim(u8, dbuf[0..@min(dlen, 8)], " \t\r\n");
@@ -239,18 +257,19 @@ pub const PackageBuilder = struct {
 
     /// Build the .nvcache package
     pub fn build(self: *PackageBuilder, output_path: []const u8) !void {
+        const io = getIo();
         // Create output directory
         const dir_path = fs.path.dirname(output_path) orelse ".";
-        fs.cwd().makePath(dir_path) catch {};
+        Dir.cwd().createDirPath(io, dir_path) catch {};
 
         // Create the package as a directory with manifest + cache files
-        fs.cwd().makePath(output_path) catch {};
+        Dir.cwd().createDirPath(io, output_path) catch {};
 
-        var out_dir = try fs.cwd().openDir(output_path, .{});
-        defer out_dir.close();
+        var out_dir = try Dir.cwd().openDir(io, output_path, .{});
+        defer out_dir.close(io);
 
         // Create cache subdirectory
-        try out_dir.makePath("cache");
+        try out_dir.createDirPath(io, "cache");
 
         // Copy cache files
         var total_size: u64 = 0;
@@ -261,7 +280,7 @@ pub const PackageBuilder = struct {
             try copyPath(self.allocator, entry.source_path, dest);
 
             // Get size
-            const stat = fs.cwd().statFile(entry.source_path) catch continue;
+            const stat = Dir.cwd().statFile(io, entry.source_path, .{}) catch continue;
             total_size += stat.size;
         }
 
@@ -277,8 +296,9 @@ pub const PackageBuilder = struct {
     }
 
     fn writeManifest(self: *PackageBuilder, path: []const u8, total_size: u64, gpu: *const GpuProfile) !void {
-        const file = try fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
+        const io = getIo();
+        const file = try Dir.cwd().createFile(io, path, .{ .truncate = true });
+        defer file.close(io);
 
         var buf: [8192]u8 = undefined;
         var pos: usize = 0;
@@ -309,7 +329,7 @@ pub const PackageBuilder = struct {
 
         pos += (std.fmt.bufPrint(buf[pos..], "\n  ]\n}}\n", .{}) catch return error.BufferOverflow).len;
 
-        _ = try file.pwrite(buf[0..pos], 0);
+        _ = try file.writePositionalAll(io, buf[0..pos], 0);
     }
 };
 
@@ -319,11 +339,12 @@ pub fn importPackage(
     package_path: []const u8,
     destination: ?[]const u8,
 ) !struct { imported: usize, skipped: usize } {
+    const io = getIo();
     // Read manifest
     const manifest_path = try fs.path.join(allocator, &.{ package_path, "manifest.json" });
     defer allocator.free(manifest_path);
 
-    const manifest_data = try fs.cwd().readFileAlloc(manifest_path, allocator, .unlimited);
+    const manifest_data = try Dir.cwd().readFileAlloc(io, manifest_path, allocator, .unlimited);
     defer allocator.free(manifest_data);
 
     var parsed = try json.parseFromSlice(json.Value, allocator, manifest_data, .{});
@@ -396,7 +417,7 @@ pub fn importPackage(
 }
 
 fn getDefaultCacheDir(allocator: mem.Allocator, cache_type: types.CacheType) ![]const u8 {
-    const home = posix.getenv("HOME") orelse return error.NoHomeDir;
+    const home = getEnv("HOME") orelse return error.NoHomeDir;
 
     const suffix = switch (cache_type) {
         .dxvk => "/.cache/dxvk",
@@ -410,7 +431,8 @@ fn getDefaultCacheDir(allocator: mem.Allocator, cache_type: types.CacheType) ![]
 }
 
 fn copyPath(allocator: mem.Allocator, src: []const u8, dest: []const u8) !void {
-    const stat = try fs.cwd().statFile(src);
+    const io = getIo();
+    const stat = try Dir.cwd().statFile(io, src, .{});
 
     if (stat.kind == .directory) {
         try copyDirectory(allocator, src, dest);
@@ -420,31 +442,35 @@ fn copyPath(allocator: mem.Allocator, src: []const u8, dest: []const u8) !void {
 }
 
 fn copyFile(src: []const u8, dest: []const u8) !void {
+    const io = getIo();
     const dest_dir = fs.path.dirname(dest) orelse ".";
-    fs.cwd().makePath(dest_dir) catch {};
+    Dir.cwd().createDirPath(io, dest_dir) catch {};
 
-    const src_file = try fs.cwd().openFile(src, .{});
-    defer src_file.close();
+    const src_file = try Dir.cwd().openFile(io, src, .{});
+    defer src_file.close(io);
 
-    const dest_file = try fs.cwd().createFile(dest, .{ .truncate = true });
-    defer dest_file.close();
+    const dest_file = try Dir.cwd().createFile(io, dest, .{ .truncate = true });
+    defer dest_file.close(io);
 
     var buffer: [64 * 1024]u8 = undefined;
+    var offset: u64 = 0;
     while (true) {
-        const n = try src_file.read(&buffer);
+        const n = src_file.readPositionalAll(io, &buffer, offset) catch break;
         if (n == 0) break;
-        try dest_file.writeAll(buffer[0..n]);
+        _ = dest_file.writePositionalAll(io, buffer[0..n], offset) catch break;
+        offset += n;
     }
 }
 
 fn copyDirectory(allocator: mem.Allocator, src: []const u8, dest: []const u8) !void {
-    fs.cwd().makePath(dest) catch {};
+    const io = getIo();
+    Dir.cwd().createDirPath(io, dest) catch {};
 
-    var dir = try fs.cwd().openDir(src, .{ .iterate = true });
-    defer dir.close();
+    var dir = try Dir.cwd().openDir(io, src, .{ .iterate = true });
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         const from = try fs.path.join(allocator, &.{ src, entry.name });
         defer allocator.free(from);
         const to = try fs.path.join(allocator, &.{ dest, entry.name });

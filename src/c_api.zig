@@ -11,6 +11,14 @@ const types = @import("types.zig");
 const paths = @import("paths.zig");
 const steam = @import("steam.zig");
 
+const Io = std.Io;
+const Dir = std.Io.Dir;
+
+/// Get the global debug Io instance for file operations
+fn getIo() Io {
+    return std.Options.debug_io;
+}
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -361,7 +369,7 @@ export fn nvshader_get_last_error(ctx: nvshader_ctx_t) [*:0]const u8 {
 
 /// Check if NVIDIA GPU is present
 export fn nvshader_is_nvidia_gpu() bool {
-    std.fs.cwd().access("/proc/driver/nvidia/version", .{}) catch return false;
+    Dir.cwd().access(getIo(), "/proc/driver/nvidia/version", .{}) catch return false;
     return true;
 }
 

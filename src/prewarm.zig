@@ -1,9 +1,24 @@
 const std = @import("std");
-const fs = std.fs;
 const mem = std.mem;
-const posix = std.posix;
 const types = @import("types.zig");
 const cache = @import("cache.zig");
+
+const Io = std.Io;
+const Dir = std.Io.Dir;
+
+/// Get the global debug Io instance for file operations
+fn getIo() Io {
+    return std.Options.debug_io;
+}
+
+/// Get environment variable using libc
+fn getEnv(name: [*:0]const u8) ?[]const u8 {
+    const result = std.c.getenv(name);
+    if (result) |ptr| {
+        return std.mem.sliceTo(ptr, 0);
+    }
+    return null;
+}
 
 /// Pre-warming status for a cache entry
 pub const PrewarmStatus = enum {
@@ -85,7 +100,7 @@ pub const PrewarmEngine = struct {
         }
 
         // Check Steam's bundled fossilize
-        const home = posix.getenv("HOME") orelse return null;
+        const home = getEnv("HOME") orelse return null;
         const steam_paths = [_][]const u8{
             "/.steam/steam/ubuntu12_32/fossilize_replay",
             "/.local/share/Steam/ubuntu12_32/fossilize_replay",
@@ -148,15 +163,16 @@ pub const PrewarmEngine = struct {
         try args.append(self.allocator, foz_path);
 
         // Execute fossilize_replay
-        var child = std.process.Child.init(args.items, self.allocator);
-        child.stderr_behavior = .Ignore;
-        child.stdout_behavior = .Ignore;
+        const io = getIo();
+        var child = try std.process.spawn(io, .{
+            .argv = args.items,
+            .stderr = .ignore,
+            .stdout = .ignore,
+        });
+        const result = try child.wait(io);
 
-        try child.spawn();
-        const result = try child.wait();
-
-        const status: PrewarmStatus = switch (result.Exited) {
-            0 => .completed,
+        const status: PrewarmStatus = switch (result) {
+            .exited => |code| if (code == 0) .completed else .failed,
             else => .failed,
         };
 
@@ -179,8 +195,9 @@ pub const PrewarmEngine = struct {
         dir_path: []const u8,
         callback: ?PrewarmCallback,
     ) !struct { completed: usize, failed: usize } {
-        var dir = fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return .{ .completed = 0, .failed = 0 };
-        defer dir.close();
+        const io = getIo();
+        var dir = Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return .{ .completed = 0, .failed = 0 };
+        defer dir.close(io);
 
         var foz_files = std.ArrayListUnmanaged([]const u8){};
         defer {
@@ -190,9 +207,9 @@ pub const PrewarmEngine = struct {
 
         // Collect .foz files
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(io)) |entry| {
             if (entry.kind == .file and mem.endsWith(u8, entry.name, ".foz")) {
-                const full_path = try fs.path.join(self.allocator, &.{ dir_path, entry.name });
+                const full_path = try std.fs.path.join(self.allocator, &.{ dir_path, entry.name });
                 try foz_files.append(self.allocator, full_path);
             }
         }
@@ -290,7 +307,7 @@ pub const PrewarmEngine = struct {
 };
 
 fn pathExists(path: []const u8) bool {
-    fs.cwd().access(path, .{}) catch return false;
+    Dir.cwd().access(getIo(), path, .{}) catch return false;
     return true;
 }
 

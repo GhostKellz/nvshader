@@ -4,6 +4,23 @@ const fs = std.fs;
 const json = std.json;
 const steam = @import("steam.zig");
 
+const Io = std.Io;
+const Dir = std.Io.Dir;
+
+/// Get the global debug Io instance for file operations
+fn getIo() Io {
+    return std.Options.debug_io;
+}
+
+/// Get environment variable using libc
+fn getEnv(name: [*:0]const u8) ?[]const u8 {
+    const result = std.c.getenv(name);
+    if (result) |ptr| {
+        return std.mem.sliceTo(ptr, 0);
+    }
+    return null;
+}
+
 pub const GameSource = enum {
     steam,
     lutris,
@@ -114,7 +131,8 @@ pub const GameCatalog = struct {
     }
 
     fn detectLutris(self: *GameCatalog) !void {
-        const home = std.posix.getenv("HOME") orelse return;
+        const home = getEnv("HOME") orelse return;
+        const io = getIo();
         const suffixes = [_][]const u8{
             "/.local/share/lutris/games",
             "/.config/lutris/games",
@@ -124,11 +142,11 @@ pub const GameCatalog = struct {
             const dir_path = std.mem.concat(self.allocator, u8, &.{ home, suffix }) catch continue;
             defer self.allocator.free(dir_path);
 
-            var dir = fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
-            defer dir.close();
+            var dir = Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch continue;
+            defer dir.close(io);
 
             var iter = dir.iterate();
-            while (iter.next() catch null) |entry| {
+            while (iter.next(io) catch null) |entry| {
                 if (entry.kind != .file) continue;
                 if (!mem.endsWith(u8, entry.name, ".yml")) continue;
 
@@ -167,7 +185,7 @@ pub const GameCatalog = struct {
     }
 
     fn detectHeroic(self: *GameCatalog) !void {
-        const home = std.posix.getenv("HOME") orelse return;
+        const home = getEnv("HOME") orelse return;
 
         // Heroic stores installed games in ~/.config/heroic/gog_store/installed.json
         // and ~/.config/heroic/legendary/installed.json (for Epic)
@@ -186,7 +204,7 @@ pub const GameCatalog = struct {
     }
 
     fn parseHeroicJson(self: *GameCatalog, path: []const u8, id_prefix: []const u8) !void {
-        const data = fs.cwd().readFileAlloc(path, self.allocator, .unlimited) catch return;
+        const data = Dir.cwd().readFileAlloc(getIo(), path, self.allocator, .unlimited) catch return;
         defer self.allocator.free(data);
 
         var parsed = json.parseFromSlice(json.Value, self.allocator, data, .{}) catch return;
@@ -255,11 +273,11 @@ pub const GameCatalog = struct {
     }
 
     fn loadManual(self: *GameCatalog) !void {
-        const home = std.posix.getenv("HOME") orelse return;
+        const home = getEnv("HOME") orelse return;
         const config_path = std.mem.concat(self.allocator, u8, &.{ home, "/.config/nvshader/games.json" }) catch return;
         defer self.allocator.free(config_path);
 
-        const data = fs.cwd().readFileAlloc(config_path, self.allocator, .unlimited) catch return;
+        const data = Dir.cwd().readFileAlloc(getIo(), config_path, self.allocator, .unlimited) catch return;
         defer self.allocator.free(data);
 
         var parsed = json.parseFromSlice(json.Value, self.allocator, data, .{}) catch return;
@@ -321,17 +339,18 @@ pub const GameCatalog = struct {
     }
 
     pub fn saveManual(self: *GameCatalog) !void {
-        const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
+        const io = getIo();
+        const home = getEnv("HOME") orelse return error.NoHomeDir;
         const config_dir = try std.mem.concat(self.allocator, u8, &.{ home, "/.config/nvshader" });
         defer self.allocator.free(config_dir);
 
-        fs.cwd().makePath(config_dir) catch {};
+        Dir.cwd().createDirPath(io, config_dir) catch {};
 
         const config_path = try std.mem.concat(self.allocator, u8, &.{ config_dir, "/games.json" });
         defer self.allocator.free(config_path);
 
-        const file = try fs.cwd().createFile(config_path, .{ .truncate = true });
-        defer file.close();
+        const file = try Dir.cwd().createFile(io, config_path, .{ .truncate = true });
+        defer file.close(io);
 
         var writer = file.writer();
         try writer.writeAll("{\n  \"games\": [\n");
@@ -397,11 +416,12 @@ const LutrisParse = struct {
 };
 
 fn parseLutrisYaml(allocator: mem.Allocator, path: []const u8) ?LutrisParse {
-    var file = fs.cwd().openFile(path, .{}) catch return null;
-    defer file.close();
+    const io = getIo();
+    var file = Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer file.close(io);
 
     var buf: [16384]u8 = undefined;
-    const len = file.preadAll(&buf, 0) catch return null;
+    const len = file.readPositionalAll(io, &buf, 0) catch return null;
     const data = buf[0..len];
 
     var name: ?[]const u8 = null;

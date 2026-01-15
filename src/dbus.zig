@@ -1,11 +1,18 @@
 const std = @import("std");
 const mem = std.mem;
 const posix = std.posix;
-const fs = std.fs;
 const cache = @import("cache.zig");
 const steam = @import("steam.zig");
 const sharing = @import("sharing.zig");
 const stats = @import("stats.zig");
+
+const Io = std.Io;
+const Dir = std.Io.Dir;
+
+/// Get the global debug Io instance for file operations
+fn getIo() Io {
+    return std.Options.debug_io;
+}
 
 /// D-Bus service name for nvshader
 pub const service_name = "com.nvcontrol.Shader";
@@ -66,23 +73,34 @@ pub const IpcServer = struct {
     /// Start the IPC server
     pub fn start(self: *IpcServer) !void {
         // Remove existing socket if present
-        fs.cwd().deleteFile(socket_path) catch {};
+        Dir.cwd().deleteFile(getIo(), socket_path) catch {};
 
-        // Create Unix domain socket
-        const sock = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+        // Create Unix domain socket using raw syscall
+        const AF_UNIX: u32 = 1;
+        const SOCK_STREAM: u32 = 1;
+        const SOCK_CLOEXEC: u32 = 0x80000;
+        const sock_result = std.os.linux.socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        const sock_signed: isize = @bitCast(sock_result);
+        if (sock_signed < 0) return error.SocketCreateFailed;
+        const sock: posix.socket_t = @intCast(sock_result);
         errdefer posix.close(sock);
 
         // Bind to socket path
-        var addr: posix.sockaddr.un = .{ .path = undefined };
+        var addr: std.os.linux.sockaddr.un = .{ .family = AF_UNIX, .path = undefined };
         @memset(&addr.path, 0);
         const path_bytes: []const u8 = socket_path;
         @memcpy(addr.path[0..path_bytes.len], path_bytes);
 
-        try posix.bind(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
-        try posix.listen(sock, 5);
+        const bind_result = std.os.linux.bind(sock, @ptrCast(&addr), @sizeOf(std.os.linux.sockaddr.un));
+        const bind_signed: isize = @bitCast(bind_result);
+        if (bind_signed < 0) return error.BindFailed;
+
+        const listen_result = std.os.linux.listen(sock, 5);
+        const listen_signed: isize = @bitCast(listen_result);
+        if (listen_signed < 0) return error.ListenFailed;
 
         // Make socket accessible via chmod
-        _ = std.posix.fchmodat(posix.AT.FDCWD, socket_path, 0o666, 0) catch {};
+        _ = std.os.linux.fchmodat(std.os.linux.AT.FDCWD, socket_path, 0o666);
 
         self.socket_fd = sock;
         self.running = true;
@@ -95,7 +113,7 @@ pub const IpcServer = struct {
             posix.close(fd);
             self.socket_fd = null;
         }
-        fs.cwd().deleteFile(socket_path) catch {};
+        Dir.cwd().deleteFile(getIo(), socket_path) catch {};
     }
 
     /// Accept and handle one connection (non-blocking poll)
@@ -122,7 +140,10 @@ pub const IpcServer = struct {
 
     fn handleClient(self: *IpcServer, client: posix.socket_t) !void {
         var buf: [1024]u8 = undefined;
-        const n = try posix.recv(client, &buf, 0);
+        const recv_result = std.os.linux.recvfrom(client, &buf, buf.len, 0, null, null);
+        const recv_signed: isize = @bitCast(recv_result);
+        if (recv_signed <= 0) return;
+        const n: usize = @intCast(recv_result);
         if (n == 0) return;
 
         const msg_type: MessageType = @enumFromInt(buf[0]);
@@ -135,7 +156,7 @@ pub const IpcServer = struct {
             else => "Unknown command",
         };
 
-        _ = try posix.send(client, response, 0);
+        _ = std.os.linux.sendto(client, response.ptr, response.len, 0, null, 0);
     }
 
     fn handleStatus(self: *IpcServer, buf: []u8) ![]const u8 {
@@ -147,7 +168,7 @@ pub const IpcServer = struct {
         const s = manager.getStats();
 
         return std.fmt.bufPrint(buf,
-            \\{{"status":"ok","version":"0.1.0","entries":{d},"total_bytes":{d},"nvidia_bytes":{d},"mesa_bytes":{d},"fossilize_bytes":{d},"dxvk_bytes":{d}}}
+            \\{{"status":"ok","version":"0.1.1","entries":{d},"total_bytes":{d},"nvidia_bytes":{d},"mesa_bytes":{d},"fossilize_bytes":{d},"dxvk_bytes":{d}}}
         , .{
             manager.entries.items.len,
             s.total_size_bytes,
@@ -216,24 +237,36 @@ pub const IpcClient = struct {
 
     /// Query the nvshader daemon
     pub fn query(self: *IpcClient, msg_type: MessageType) ![]const u8 {
-        const sock = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+        const AF_UNIX: u32 = 1;
+        const SOCK_STREAM: u32 = 1;
+        const SOCK_CLOEXEC: u32 = 0x80000;
+        const sock_result = std.os.linux.socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        const sock_signed: isize = @bitCast(sock_result);
+        if (sock_signed < 0) return error.SocketCreateFailed;
+        const sock: i32 = @intCast(sock_result);
         defer posix.close(sock);
 
-        var addr: posix.sockaddr.un = .{ .path = undefined };
+        var addr: std.os.linux.sockaddr.un = .{ .family = AF_UNIX, .path = undefined };
         @memset(&addr.path, 0);
         const path_bytes: []const u8 = socket_path;
         @memcpy(addr.path[0..path_bytes.len], path_bytes);
 
-        try posix.connect(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
+        const connect_result = std.os.linux.connect(sock, @ptrCast(&addr), @sizeOf(std.os.linux.sockaddr.un));
+        const connect_signed: isize = @bitCast(connect_result);
+        if (connect_signed < 0) return error.ConnectFailed;
 
         // Send request
         const msg = [_]u8{@intFromEnum(msg_type)};
-        _ = try posix.send(sock, &msg, 0);
+        const send_result = std.os.linux.sendto(sock, &msg, msg.len, 0, null, 0);
+        const send_signed: isize = @bitCast(send_result);
+        if (send_signed < 0) return error.SendFailed;
 
         // Receive response
         var buf: [8192]u8 = undefined;
-        const n = try posix.recv(sock, &buf, 0);
-        if (n == 0) return error.NoResponse;
+        const recv_result = std.os.linux.recvfrom(sock, &buf, buf.len, 0, null, null);
+        const recv_signed: isize = @bitCast(recv_result);
+        if (recv_signed <= 0) return error.NoResponse;
+        const n: usize = @intCast(recv_result);
 
         return self.allocator.dupe(u8, buf[0..n]);
     }
@@ -253,18 +286,26 @@ pub const IpcClient = struct {
 
 /// Check if daemon is running
 pub fn isDaemonRunning() bool {
-    fs.cwd().access(socket_path, .{}) catch return false;
+    Dir.cwd().access(getIo(), socket_path, .{}) catch return false;
 
-    // Try to connect
-    const sock = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch return false;
+    // Try to connect using raw syscall
+    const AF_UNIX: u32 = 1;
+    const SOCK_STREAM: u32 = 1;
+    const SOCK_CLOEXEC: u32 = 0x80000;
+    const sock_result = std.os.linux.socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    const sock_signed: isize = @bitCast(sock_result);
+    if (sock_signed < 0) return false;
+    const sock: posix.socket_t = @intCast(sock_result);
     defer posix.close(sock);
 
-    var addr: posix.sockaddr.un = .{ .path = undefined };
+    var addr: std.os.linux.sockaddr.un = .{ .family = AF_UNIX, .path = undefined };
     @memset(&addr.path, 0);
     const path_bytes: []const u8 = socket_path;
     @memcpy(addr.path[0..path_bytes.len], path_bytes);
 
-    posix.connect(sock, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch return false;
+    const connect_result = std.os.linux.connect(sock, @ptrCast(&addr), @sizeOf(std.os.linux.sockaddr.un));
+    const connect_signed: isize = @bitCast(connect_result);
+    if (connect_signed < 0) return false;
     return true;
 }
 

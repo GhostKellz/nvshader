@@ -2,6 +2,23 @@ const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
 
+const Io = std.Io;
+const Dir = std.Io.Dir;
+
+/// Get the global debug Io instance for file operations
+fn getIo() Io {
+    return std.Options.debug_io;
+}
+
+/// Get environment variable using libc
+fn getEnv(name: [*:0]const u8) ?[]const u8 {
+    const result = std.c.getenv(name);
+    if (result) |ptr| {
+        return std.mem.sliceTo(ptr, 0);
+    }
+    return null;
+}
+
 /// Steam library location
 pub const SteamLibrary = struct {
     path: []const u8,
@@ -58,7 +75,7 @@ pub const SteamDetector = struct {
     }
 
     fn detectSteamRoot(self: *SteamDetector) !void {
-        const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
+        const home = getEnv("HOME") orelse return error.NoHomeDir;
 
         const suffixes = [_][]const u8{
             "/.steam/steam",
@@ -98,11 +115,12 @@ pub const SteamDetector = struct {
         const vdf_path = try std.fmt.allocPrint(self.allocator, "{s}/steamapps/libraryfolders.vdf", .{root});
         defer self.allocator.free(vdf_path);
 
-        var file = fs.cwd().openFile(vdf_path, .{}) catch return;
-        defer file.close();
+        const io = getIo();
+        var file = Dir.cwd().openFile(io, vdf_path, .{}) catch return;
+        defer file.close(io);
 
         var buf: [4096]u8 = undefined;
-        const bytes_read = file.preadAll(&buf, 0) catch return;
+        const bytes_read = file.readPositionalAll(io, &buf, 0) catch return;
         const content = buf[0..bytes_read];
 
         // Simple parsing - look for "path" entries
@@ -149,11 +167,12 @@ pub const SteamDetector = struct {
         const steamapps = try std.fmt.allocPrint(self.allocator, "{s}/steamapps", .{library_path});
         defer self.allocator.free(steamapps);
 
-        var dir = fs.cwd().openDir(steamapps, .{ .iterate = true }) catch return;
-        defer dir.close();
+        const io = getIo();
+        var dir = Dir.cwd().openDir(io, steamapps, .{ .iterate = true }) catch return;
+        defer dir.close(io);
 
         var iter = dir.iterate();
-        while (try iter.next()) |entry| {
+        while (try iter.next(io)) |entry| {
             if (entry.kind == .file and mem.startsWith(u8, entry.name, "appmanifest_") and mem.endsWith(u8, entry.name, ".acf")) {
                 const manifest_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ steamapps, entry.name });
                 defer self.allocator.free(manifest_path);
@@ -166,11 +185,12 @@ pub const SteamDetector = struct {
     }
 
     fn parseAppManifest(self: *SteamDetector, manifest_path: []const u8, library_path: []const u8) !?SteamGame {
-        var file = fs.cwd().openFile(manifest_path, .{}) catch return null;
-        defer file.close();
+        const io = getIo();
+        var file = Dir.cwd().openFile(io, manifest_path, .{}) catch return null;
+        defer file.close(io);
 
         var buf: [8192]u8 = undefined;
-        const bytes_read = file.preadAll(&buf, 0) catch return null;
+        const bytes_read = file.readPositionalAll(io, &buf, 0) catch return null;
         const content = buf[0..bytes_read];
 
         var app_id: ?u32 = null;
@@ -291,35 +311,43 @@ fn extractQuotedValue(line: []const u8) ?[]const u8 {
 }
 
 fn pathExists(path: []const u8) bool {
-    fs.cwd().access(path, .{}) catch return false;
+    Dir.cwd().access(getIo(), path, .{}) catch return false;
     return true;
 }
 
 /// Resolve symlinks to get the real path
 fn realPath(allocator: mem.Allocator, path: []const u8) ![]const u8 {
+    const io = getIo();
     // Use /proc/self/fd trick to get real path
-    var result_buf: [4096]u8 = undefined;
+    var result_buf: [4097]u8 = undefined;
 
     // Try to open the path and use /proc/self/fd to get real path
-    var dir = fs.cwd().openDir(path, .{}) catch {
+    var dir = Dir.cwd().openDir(io, path, .{}) catch {
         // If not a directory, try as file
-        var file = try fs.cwd().openFile(path, .{});
-        defer file.close();
-        const fd_path = try std.fmt.bufPrint(&result_buf, "/proc/self/fd/{d}", .{file.handle});
+        var file = try Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
+        const fd_path_len = (std.fmt.bufPrint(result_buf[0..4096], "/proc/self/fd/{d}", .{file.handle}) catch return allocator.dupe(u8, path)).len;
+        result_buf[fd_path_len] = 0;
         var link_buf: [4096]u8 = undefined;
-        const resolved = std.posix.readlink(fd_path, &link_buf) catch return allocator.dupe(u8, path);
-        return allocator.dupe(u8, resolved);
+        const link_result = std.os.linux.readlink(@ptrCast(&result_buf), &link_buf, link_buf.len);
+        const link_signed: isize = @bitCast(link_result);
+        if (link_signed <= 0) return allocator.dupe(u8, path);
+        return allocator.dupe(u8, link_buf[0..@intCast(link_result)]);
     };
-    defer dir.close();
+    defer dir.close(io);
 
-    const fd_path = try std.fmt.bufPrint(&result_buf, "/proc/self/fd/{d}", .{dir.fd});
+    const fd_path_len = (std.fmt.bufPrint(result_buf[0..4096], "/proc/self/fd/{d}", .{dir.handle}) catch return allocator.dupe(u8, path)).len;
+    result_buf[fd_path_len] = 0;
     var link_buf: [4096]u8 = undefined;
-    const resolved = std.posix.readlink(fd_path, &link_buf) catch return allocator.dupe(u8, path);
-    return allocator.dupe(u8, resolved);
+    const link_result = std.os.linux.readlink(@ptrCast(&result_buf), &link_buf, link_buf.len);
+    const link_signed: isize = @bitCast(link_result);
+    if (link_signed <= 0) return allocator.dupe(u8, path);
+    return allocator.dupe(u8, link_buf[0..@intCast(link_result)]);
 }
 
 /// Check if running on Steam Deck
 pub fn isSteamDeck() bool {
+    const io = getIo();
     // Check for Steam Deck hardware via DMI
     const deck_paths = [_][]const u8{
         "/sys/class/dmi/id/board_vendor",
@@ -328,11 +356,11 @@ pub fn isSteamDeck() bool {
     };
 
     for (deck_paths) |path| {
-        var file = fs.cwd().openFile(path, .{}) catch continue;
-        defer file.close();
+        var file = Dir.cwd().openFile(io, path, .{}) catch continue;
+        defer file.close(io);
 
         var buf: [64]u8 = undefined;
-        const len = file.preadAll(&buf, 0) catch continue;
+        const len = file.readPositionalAll(io, &buf, 0) catch continue;
         const content = mem.trim(u8, buf[0..len], " \t\r\n");
 
         if (mem.indexOf(u8, content, "Valve") != null or
@@ -345,7 +373,7 @@ pub fn isSteamDeck() bool {
     }
 
     // Also check environment variable (common in gaming mode)
-    if (std.posix.getenv("SteamDeck")) |_| {
+    if (getEnv("SteamDeck")) |_| {
         return true;
     }
 
@@ -354,12 +382,13 @@ pub fn isSteamDeck() bool {
 
 /// Get Steam Deck model if running on one
 pub fn getSteamDeckModel() ?[]const u8 {
+    const io = getIo();
     const product_path = "/sys/class/dmi/id/product_name";
-    var file = fs.cwd().openFile(product_path, .{}) catch return null;
-    defer file.close();
+    var file = Dir.cwd().openFile(io, product_path, .{}) catch return null;
+    defer file.close(io);
 
     var buf: [64]u8 = undefined;
-    const len = file.preadAll(&buf, 0) catch return null;
+    const len = file.readPositionalAll(io, &buf, 0) catch return null;
     const content = mem.trim(u8, buf[0..len], " \t\r\n");
 
     if (mem.indexOf(u8, content, "Jupiter") != null) {
@@ -385,10 +414,10 @@ pub const DeckPreCacheConfig = struct {
 /// Pre-cache configuration for optimal Deck performance
 pub fn getOptimalDeckConfig() DeckPreCacheConfig {
     // Check available storage
-    const home = std.posix.getenv("HOME") orelse return DeckPreCacheConfig{};
+    const home = getEnv("HOME") orelse return DeckPreCacheConfig{};
 
     // Check if on internal storage (limited) or SD card
-    const stat = fs.cwd().statFile(home) catch return DeckPreCacheConfig{};
+    const stat = Dir.cwd().statFile(getIo(), home, .{}) catch return DeckPreCacheConfig{};
     _ = stat;
 
     // Return conservative config for Deck
@@ -402,6 +431,7 @@ pub fn getOptimalDeckConfig() DeckPreCacheConfig {
 
 /// Get shader cache download status for a game
 pub fn getShaderCacheStatus(allocator: mem.Allocator, steam_root: []const u8, app_id: u32) !ShaderCacheStatus {
+    const io = getIo();
     const cache_path = try std.fmt.allocPrint(allocator, "{s}/steamapps/shadercache/{d}", .{ steam_root, app_id });
     defer allocator.free(cache_path);
 
@@ -413,8 +443,8 @@ pub fn getShaderCacheStatus(allocator: mem.Allocator, steam_root: []const u8, ap
         .pipeline_files = 0,
     };
 
-    var dir = fs.cwd().openDir(cache_path, .{ .iterate = true }) catch return status;
-    defer dir.close();
+    var dir = Dir.cwd().openDir(io, cache_path, .{ .iterate = true }) catch return status;
+    defer dir.close(io);
 
     status.cache_exists = true;
 
@@ -428,11 +458,12 @@ pub fn getShaderCacheStatus(allocator: mem.Allocator, steam_root: []const u8, ap
 }
 
 fn countCacheFiles(allocator: mem.Allocator, path: []const u8, status: *ShaderCacheStatus) !void {
-    var dir = fs.cwd().openDir(path, .{ .iterate = true }) catch return;
-    defer dir.close();
+    const io = getIo();
+    var dir = Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return;
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         switch (entry.kind) {
             .file => {
                 if (mem.endsWith(u8, entry.name, ".foz")) {
@@ -469,23 +500,24 @@ pub fn clearGameCache(allocator: mem.Allocator, steam_root: []const u8, app_id: 
     defer allocator.free(cache_path);
 
     // Delete the directory recursively
-    fs.cwd().deleteTree(cache_path) catch |err| {
+    Dir.cwd().deleteTree(getIo(), cache_path) catch |err| {
         if (err != error.FileNotFound) return err;
     };
 }
 
 /// Get total shader cache size across all games
 pub fn getTotalShaderCacheSize(allocator: mem.Allocator, steam_root: []const u8) !u64 {
+    const io = getIo();
     const cache_path = try std.fmt.allocPrint(allocator, "{s}/steamapps/shadercache", .{steam_root});
     defer allocator.free(cache_path);
 
     var total: u64 = 0;
 
-    var dir = fs.cwd().openDir(cache_path, .{ .iterate = true }) catch return 0;
-    defer dir.close();
+    var dir = Dir.cwd().openDir(io, cache_path, .{ .iterate = true }) catch return 0;
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         if (entry.kind == .directory) {
             const subdir_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ cache_path, entry.name });
             defer allocator.free(subdir_path);
@@ -498,16 +530,17 @@ pub fn getTotalShaderCacheSize(allocator: mem.Allocator, steam_root: []const u8)
 }
 
 fn dirSize(allocator: mem.Allocator, path: []const u8) !u64 {
+    const io = getIo();
     var total: u64 = 0;
 
-    var dir = fs.cwd().openDir(path, .{ .iterate = true }) catch return 0;
-    defer dir.close();
+    var dir = Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return 0;
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         switch (entry.kind) {
             .file => {
-                const stat = dir.statFile(entry.name) catch continue;
+                const stat = dir.statFile(io, entry.name, .{}) catch continue;
                 total += stat.size;
             },
             .directory => {

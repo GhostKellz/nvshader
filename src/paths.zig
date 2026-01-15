@@ -1,6 +1,21 @@
 const std = @import("std");
-const fs = std.fs;
 const mem = std.mem;
+const Io = std.Io;
+const Dir = std.Io.Dir;
+
+/// Get the global debug Io instance for file operations
+fn getIo() Io {
+    return std.Options.debug_io;
+}
+
+/// Get environment variable using libc
+fn getEnv(name: [*:0]const u8) ?[]const u8 {
+    const result = std.c.getenv(name);
+    if (result) |ptr| {
+        return std.mem.sliceTo(ptr, 0);
+    }
+    return null;
+}
 
 /// Known cache paths for different cache types
 pub const CachePaths = struct {
@@ -14,7 +29,7 @@ pub const CachePaths = struct {
     allocator: mem.Allocator,
 
     pub fn detect(allocator: mem.Allocator) !CachePaths {
-        const home = std.posix.getenv("HOME") orelse return error.NoHomeDir;
+        const home = getEnv("HOME") orelse return error.NoHomeDir;
 
         return CachePaths{
             .dxvk = try detectDxvkPath(allocator, home),
@@ -64,7 +79,7 @@ pub const CachePaths = struct {
 
 fn detectDxvkPath(allocator: mem.Allocator, home: []const u8) !?[]const u8 {
     // Check env var first
-    if (std.posix.getenv("DXVK_STATE_CACHE_PATH")) |env_path| {
+    if (getEnv("DXVK_STATE_CACHE_PATH")) |env_path| {
         return try allocator.dupe(u8, env_path);
     }
 
@@ -81,7 +96,7 @@ fn detectDxvkPath(allocator: mem.Allocator, home: []const u8) !?[]const u8 {
 
 fn detectVkd3dPath(allocator: mem.Allocator, home: []const u8) !?[]const u8 {
     // Check env var first
-    if (std.posix.getenv("VKD3D_SHADER_CACHE_PATH")) |env_path| {
+    if (getEnv("VKD3D_SHADER_CACHE_PATH")) |env_path| {
         return try allocator.dupe(u8, env_path);
     }
 
@@ -108,7 +123,7 @@ fn detectNvidiaPath(allocator: mem.Allocator, home: []const u8) !?[]const u8 {
 
 fn detectMesaPath(allocator: mem.Allocator, home: []const u8) !?[]const u8 {
     // Check XDG_CACHE_HOME first
-    const cache_home = std.posix.getenv("XDG_CACHE_HOME");
+    const cache_home = getEnv("XDG_CACHE_HOME");
 
     const default = if (cache_home) |ch|
         try std.fmt.allocPrint(allocator, "{s}/mesa_shader_cache", .{ch})
@@ -163,23 +178,24 @@ fn detectSteamShaderCache(allocator: mem.Allocator, home: []const u8) !?[]const 
 }
 
 fn pathExists(path: []const u8) bool {
-    fs.cwd().access(path, .{}) catch return false;
+    Dir.cwd().access(getIo(), path, .{}) catch return false;
     return true;
 }
 
 /// Get directory size in bytes
 pub fn getDirSize(allocator: mem.Allocator, path: []const u8) !u64 {
+    const io = getIo();
     var total: u64 = 0;
 
-    var dir = fs.cwd().openDir(path, .{ .iterate = true }) catch return 0;
-    defer dir.close();
+    var dir = Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return 0;
+    defer dir.close(io);
 
     var walker = dir.walk(allocator) catch return 0;
     defer walker.deinit();
 
-    while (walker.next() catch null) |entry| {
+    while (walker.next(io) catch null) |entry| {
         if (entry.kind == .file) {
-            const stat = entry.dir.statFile(entry.basename) catch continue;
+            const stat = entry.dir.statFile(io, entry.basename, .{}) catch continue;
             total += stat.size;
         }
     }
@@ -189,15 +205,16 @@ pub fn getDirSize(allocator: mem.Allocator, path: []const u8) !u64 {
 
 /// Count files in directory
 pub fn countFiles(allocator: mem.Allocator, path: []const u8) !u32 {
+    const io = getIo();
     var count: u32 = 0;
 
-    var dir = fs.cwd().openDir(path, .{ .iterate = true }) catch return 0;
-    defer dir.close();
+    var dir = Dir.cwd().openDir(io, path, .{ .iterate = true }) catch return 0;
+    defer dir.close(io);
 
     var walker = dir.walk(allocator) catch return 0;
     defer walker.deinit();
 
-    while (walker.next() catch null) |entry| {
+    while (walker.next(io) catch null) |entry| {
         if (entry.kind == .file) {
             count += 1;
         }

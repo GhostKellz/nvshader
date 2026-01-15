@@ -1,51 +1,60 @@
 const std = @import("std");
 const nvshader = @import("lib.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+const Io = std.Io;
+const Dir = std.Io.Dir;
 
-    var args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
+
+    // Collect command line arguments
+    var args_list: std.ArrayList([:0]const u8) = .empty;
+    defer args_list.deinit(allocator);
+
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    while (args_iter.next()) |arg| {
+        try args_list.append(allocator, arg);
+    }
+    const args = args_list.items;
 
     if (args.len <= 1) {
-        return commandStatus(allocator);
+        return commandStatus(allocator, io);
     }
 
     const command = args[1];
     if (std.mem.eql(u8, command, "status")) {
-        return commandStatus(allocator);
+        return commandStatus(allocator, io);
     } else if (std.mem.eql(u8, command, "clean")) {
-        return commandClean(allocator, args[2..]);
+        return commandClean(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "validate")) {
-        return commandValidate(allocator);
+        return commandValidate(allocator, io);
     } else if (std.mem.eql(u8, command, "scan")) {
-        return commandStatus(allocator);
+        return commandStatus(allocator, io);
     } else if (std.mem.eql(u8, command, "prewarm")) {
-        return commandPrewarm(allocator, args[2..]);
+        return commandPrewarm(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "watch")) {
-        return commandWatch(allocator, args[2..]);
+        return commandWatch(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "export")) {
-        return commandExport(allocator, args[2..]);
+        return commandExport(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "import")) {
-        return commandImport(allocator, args[2..]);
+        return commandImport(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "pack")) {
-        return commandPack(allocator, args[2..]);
+        return commandPack(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "gpu")) {
-        return commandGpu(allocator);
+        return commandGpu(allocator, io);
     } else if (std.mem.eql(u8, command, "games")) {
-        return commandGames(allocator);
+        return commandGames(allocator, io);
     } else if (std.mem.eql(u8, command, "steam")) {
-        return commandSteam(allocator, args[2..]);
+        return commandSteam(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "daemon")) {
-        return commandDaemon(allocator);
+        return commandDaemon(allocator, io);
     } else if (std.mem.eql(u8, command, "p2p")) {
-        return commandP2P(allocator, args[2..]);
+        return commandP2P(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "share")) {
-        return commandShare(allocator, args[2..]);
+        return commandShare(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "json")) {
-        return commandJson(allocator, args[2..]);
+        return commandJson(allocator, io, args[2..]);
     } else if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         printUsage();
         return;
@@ -58,7 +67,8 @@ pub fn main() !void {
     printUsage();
 }
 
-fn commandStatus(allocator: std.mem.Allocator) void {
+fn commandStatus(allocator: std.mem.Allocator, io: Io) void {
+    _ = io;
     var manager = nvshader.cache.CacheManager.init(allocator) catch {
         std.debug.print("Failed to initialize cache manager\n", .{});
         return;
@@ -85,7 +95,8 @@ fn commandStatus(allocator: std.mem.Allocator) void {
     }
 }
 
-fn commandValidate(allocator: std.mem.Allocator) void {
+fn commandValidate(allocator: std.mem.Allocator, io: Io) void {
+    _ = io;
     var manager = nvshader.cache.CacheManager.init(allocator) catch {
         std.debug.print("Failed to initialize cache manager\n", .{});
         return;
@@ -107,7 +118,7 @@ fn commandValidate(allocator: std.mem.Allocator) void {
     }
 }
 
-fn commandClean(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+fn commandClean(allocator: std.mem.Allocator, io: Io, args: []const [:0]const u8) !void {
     var manager = nvshader.cache.CacheManager.init(allocator) catch {
         std.debug.print("Failed to initialize cache manager\n", .{});
         return;
@@ -151,10 +162,11 @@ fn commandClean(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     }
 
     manager.scan() catch {};
-    commandStatus(allocator);
+    commandStatus(allocator, io);
 }
 
-fn commandPrewarm(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+fn commandPrewarm(allocator: std.mem.Allocator, io: Io, args: []const [:0]const u8) !void {
+    _ = io;
     var config = nvshader.prewarm.FossilizeConfig{};
 
     // Parse args
@@ -213,8 +225,9 @@ fn prewarmCallback(progress: nvshader.prewarm.PrewarmProgress) void {
     }
 }
 
-fn commandWatch(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+fn commandWatch(allocator: std.mem.Allocator, io: Io, args: []const [:0]const u8) !void {
     _ = args;
+    _ = io;
 
     var watcher = nvshader.watch.CacheWatcher.init(allocator) catch {
         std.debug.print("Failed to initialize watcher (inotify not available?)\n", .{});
@@ -236,7 +249,8 @@ fn commandWatch(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     var iterations: u64 = 0;
     while (iterations < 36000) { // ~1 hour max
         watcher.poll() catch {};
-        std.posix.nanosleep(0, 100_000_000);
+        var ts = std.os.linux.timespec{ .sec = 0, .nsec = 100_000_000 };
+        _ = std.os.linux.nanosleep(&ts, null);
         iterations += 1;
     }
 
@@ -257,7 +271,8 @@ fn watchCallback(event: nvshader.watch.WatchEventData) void {
     std.debug.print("[{s}] {s}: {s}\n", .{ type_str, event_str, basename });
 }
 
-fn commandExport(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+fn commandExport(allocator: std.mem.Allocator, io: Io, args: []const [:0]const u8) !void {
+    _ = io;
     if (args.len < 1) {
         std.debug.print("Usage: nvshader export <output_dir> [--game NAME]\n", .{});
         return;
@@ -305,7 +320,8 @@ fn commandExport(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     });
 }
 
-fn commandImport(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+fn commandImport(allocator: std.mem.Allocator, io: Io, args: []const [:0]const u8) !void {
+    _ = io;
     if (args.len < 1) {
         std.debug.print("Usage: nvshader import <source_dir> [--dest DIR]\n", .{});
         return;
@@ -337,7 +353,8 @@ fn commandImport(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     });
 }
 
-fn commandPack(allocator: std.mem.Allocator, args: [][:0]u8) !void {
+fn commandPack(allocator: std.mem.Allocator, io: Io, args: []const [:0]const u8) !void {
+    _ = io;
     if (args.len < 1) {
         std.debug.print("Usage: nvshader pack <output.nvcache> [--game NAME]\n", .{});
         return;
@@ -387,7 +404,8 @@ fn commandPack(allocator: std.mem.Allocator, args: [][:0]u8) !void {
     std.debug.print("Entries: {d}\n", .{builder.entries.items.len});
 }
 
-fn commandGpu(allocator: std.mem.Allocator) void {
+fn commandGpu(allocator: std.mem.Allocator, io: Io) void {
+    _ = io;
     var profile = nvshader.sharing.GpuProfile.detect(allocator) catch {
         std.debug.print("Failed to detect GPU\n", .{});
         return;
@@ -402,7 +420,8 @@ fn commandGpu(allocator: std.mem.Allocator) void {
     std.debug.print("Driver: {s}\n", .{profile.driver_version});
 }
 
-fn commandGames(allocator: std.mem.Allocator) void {
+fn commandGames(allocator: std.mem.Allocator, io: Io) void {
+    _ = io;
     var catalog = nvshader.games.GameCatalog.init(allocator);
     defer catalog.deinit();
 
@@ -462,7 +481,8 @@ fn parseByteSize(raw: []const u8) !u64 {
     return try std.math.mul(u64, base, multiplier);
 }
 
-fn commandSteam(allocator: std.mem.Allocator, args: [][:0]u8) void {
+fn commandSteam(allocator: std.mem.Allocator, io: Io, args: []const [:0]const u8) void {
+    _ = io;
     // Default to info subcommand
     var subcommand: []const u8 = "info";
     if (args.len > 0) {
@@ -614,7 +634,8 @@ fn steamDeckInfo() void {
     }
 }
 
-fn commandDaemon(allocator: std.mem.Allocator) void {
+fn commandDaemon(allocator: std.mem.Allocator, io: Io) void {
+    _ = io;
     if (nvshader.ipc.isDaemonRunning()) {
         std.debug.print("nvshader daemon is already running\n", .{});
         return;
@@ -637,14 +658,18 @@ fn commandDaemon(allocator: std.mem.Allocator) void {
     var iterations: u64 = 0;
     while (iterations < 36000) {
         server.poll() catch {};
-        std.posix.nanosleep(0, 100_000_000);
+        {
+            var ts = std.os.linux.timespec{ .sec = 0, .nsec = 100_000_000 };
+            _ = std.os.linux.nanosleep(&ts, null);
+        }
         iterations += 1;
     }
 }
 
 const p2p = @import("p2p.zig");
 
-fn commandP2P(allocator: std.mem.Allocator, args: [][:0]u8) void {
+fn commandP2P(allocator: std.mem.Allocator, io: Io, args: []const [:0]const u8) void {
+    _ = io;
     var subcommand: []const u8 = "status";
     if (args.len > 0) {
         subcommand = args[0];
@@ -769,7 +794,10 @@ fn p2pDiscover(allocator: std.mem.Allocator) void {
                 else => {},
             }
         }
-        std.posix.nanosleep(0, 100_000_000);
+        {
+            var ts = std.os.linux.timespec{ .sec = 0, .nsec = 100_000_000 };
+            _ = std.os.linux.nanosleep(&ts, null);
+        }
         iterations += 1;
     }
 
@@ -813,7 +841,10 @@ fn p2pQuery(allocator: std.mem.Allocator, game_id: []const u8) void {
                 else => {},
             }
         }
-        std.posix.nanosleep(0, 100_000_000);
+        {
+            var ts = std.os.linux.timespec{ .sec = 0, .nsec = 100_000_000 };
+            _ = std.os.linux.nanosleep(&ts, null);
+        }
         iterations += 1;
     }
 
@@ -824,7 +855,7 @@ fn p2pQuery(allocator: std.mem.Allocator, game_id: []const u8) void {
     }
 }
 
-fn commandShare(allocator: std.mem.Allocator, args: [][:0]u8) void {
+fn commandShare(allocator: std.mem.Allocator, io: Io, args: []const [:0]const u8) void {
     if (args.len < 1) {
         std.debug.print("Usage: nvshader share <game_name|game_id>\n", .{});
         std.debug.print("\nShares a game's shader cache with the P2P network.\n", .{});
@@ -860,7 +891,7 @@ fn commandShare(allocator: std.mem.Allocator, args: [][:0]u8) void {
         // Get total size
         var total_size: u64 = 0;
         for (game.cache_paths.items) |path| {
-            const stat = std.fs.cwd().statFile(path) catch continue;
+            const stat = Dir.cwd().statFile(io, path, .{}) catch continue;
             total_size += stat.size;
         }
 
@@ -873,7 +904,8 @@ fn commandShare(allocator: std.mem.Allocator, args: [][:0]u8) void {
     }
 }
 
-fn commandJson(allocator: std.mem.Allocator, args: [][:0]u8) void {
+fn commandJson(allocator: std.mem.Allocator, io: Io, args: []const [:0]const u8) void {
+    _ = io;
     var subcommand: []const u8 = "status";
     if (args.len > 0) {
         subcommand = args[0];

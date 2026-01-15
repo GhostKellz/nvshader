@@ -5,6 +5,23 @@ const posix = std.posix;
 const types = @import("types.zig");
 const paths = @import("paths.zig");
 
+const Io = std.Io;
+const Dir = std.Io.Dir;
+
+/// Get the global debug Io instance for file operations
+fn getIo() Io {
+    return std.Options.debug_io;
+}
+
+/// Get environment variable using libc
+fn getEnv(name: [*:0]const u8) ?[]const u8 {
+    const result = std.c.getenv(name);
+    if (result) |ptr| {
+        return std.mem.sliceTo(ptr, 0);
+    }
+    return null;
+}
+
 /// Event types for cache watching
 pub const WatchEvent = enum {
     created,
@@ -104,7 +121,7 @@ pub const CacheWatcher = struct {
 
     /// Add default cache directories to watch
     pub fn addDefaultWatches(self: *CacheWatcher) !void {
-        const home = posix.getenv("HOME") orelse return error.NoHomeDir;
+        const home = getEnv("HOME") orelse return error.NoHomeDir;
 
         // NVIDIA cache
         const nvidia_path = try mem.concat(self.allocator, u8, &.{ home, "/.nv/ComputeCache" });
@@ -254,7 +271,7 @@ pub const CacheWatcher = struct {
 };
 
 fn pathExists(path: []const u8) bool {
-    fs.cwd().access(path, .{}) catch return false;
+    Dir.cwd().access(getIo(), path, .{}) catch return false;
     return true;
 }
 

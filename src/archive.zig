@@ -5,6 +5,14 @@ const json = std.json;
 const cache = @import("cache.zig");
 const types = @import("types.zig");
 
+const Io = std.Io;
+const Dir = std.Io.Dir;
+
+/// Get the global debug Io instance for file operations
+fn getIo() Io {
+    return std.Options.debug_io;
+}
+
 pub const ExportReport = struct {
     entries: usize,
     files_copied: usize,
@@ -60,11 +68,12 @@ pub fn exportSelection(
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    fs.cwd().makePath(destination) catch {};
-    var dest_dir = try fs.cwd().openDir(destination, .{ .iterate = true });
-    defer dest_dir.close();
+    const io = getIo();
+    Dir.cwd().createDirPath(io, destination) catch {};
+    var dest_dir = try Dir.cwd().openDir(io, destination, .{ .iterate = true });
+    defer dest_dir.close(io);
 
-    try dest_dir.makePath("cache");
+    try dest_dir.createDirPath(io, "cache");
 
     var manifest_entries: std.ArrayListUnmanaged(ManifestEntry) = .{};
     defer {
@@ -144,9 +153,10 @@ pub fn importDirectory(
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
+    const io = getIo();
     const manifest_path = try fs.path.join(arena_alloc, &.{ source, "manifest.json" });
 
-    const manifest_data = try fs.cwd().readFileAlloc(manifest_path, allocator, .unlimited);
+    const manifest_data = try Dir.cwd().readFileAlloc(io, manifest_path, allocator, .unlimited);
     defer allocator.free(manifest_data);
 
     var parsed = json.parseFromSlice(json.Value, allocator, manifest_data, .{}) catch return error.InvalidManifest;
@@ -226,17 +236,18 @@ pub fn importDirectory(
 }
 
 fn dirSize(allocator: mem.Allocator, path: []const u8) !u64 {
+    const io = getIo();
     var total: u64 = 0;
-    var dir = try fs.openDirAbsolute(path, .{ .iterate = true });
-    defer dir.close();
+    var dir = try Dir.cwd().openDir(io, path, .{ .iterate = true });
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         const child = try fs.path.join(allocator, &.{ path, entry.name });
         defer allocator.free(child);
         switch (entry.kind) {
             .file => {
-                const stat = try dir.statFile(entry.name);
+                const stat = try dir.statFile(io, entry.name, .{});
                 total += stat.size;
             },
             .directory => total += try dirSize(allocator, child),
@@ -247,8 +258,9 @@ fn dirSize(allocator: mem.Allocator, path: []const u8) !u64 {
 }
 
 fn writeManifest(path: []const u8, entries: []const ManifestEntry, game_hint: ?[]const u8) !void {
-    const file = try fs.cwd().createFile(path, .{ .truncate = true });
-    defer file.close();
+    const io = getIo();
+    const file = try Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer file.close(io);
 
     var buf: [65536]u8 = undefined;
     var pos: usize = 0;
@@ -279,36 +291,38 @@ fn writeManifest(path: []const u8, entries: []const ManifestEntry, game_hint: ?[
 
     pos += (std.fmt.bufPrint(buf[pos..], "\n  ]\n}}\n", .{}) catch return error.BufferOverflow).len;
 
-    _ = try file.pwrite(buf[0..pos], 0);
+    _ = try file.writePositionalAll(io, buf[0..pos], 0);
 }
 
 fn copyFile(src_path: []const u8, dest_path: []const u8) !void {
+    const io = getIo();
     const dest_parent = fs.path.dirname(dest_path) orelse ".";
-    fs.cwd().makePath(dest_parent) catch {};
+    Dir.cwd().createDirPath(io, dest_parent) catch {};
 
-    const src_file = try fs.cwd().openFile(src_path, .{});
-    defer src_file.close();
+    const src_file = try Dir.cwd().openFile(io, src_path, .{});
+    defer src_file.close(io);
 
-    const dest_file = try fs.cwd().createFile(dest_path, .{ .truncate = true });
-    defer dest_file.close();
+    const dest_file = try Dir.cwd().createFile(io, dest_path, .{ .truncate = true });
+    defer dest_file.close(io);
 
     var buffer: [64 * 1024]u8 = undefined;
     var offset: u64 = 0;
     while (true) {
-        const read_bytes = src_file.pread(&buffer, offset) catch break;
+        const read_bytes = src_file.readPositionalAll(io, &buffer, offset) catch break;
         if (read_bytes == 0) break;
-        _ = dest_file.pwrite(buffer[0..read_bytes], offset) catch break;
+        _ = dest_file.writePositionalAll(io, buffer[0..read_bytes], offset) catch break;
         offset += read_bytes;
     }
 }
 
 fn copyDirectory(allocator: mem.Allocator, src_path: []const u8, dest_path: []const u8) !void {
-    fs.cwd().makePath(dest_path) catch {};
-    var dir = try fs.openDirAbsolute(src_path, .{ .iterate = true });
-    defer dir.close();
+    const io = getIo();
+    Dir.cwd().createDirPath(io, dest_path) catch {};
+    var dir = try Dir.cwd().openDir(io, src_path, .{ .iterate = true });
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         const from = try fs.path.join(allocator, &.{ src_path, entry.name });
         defer allocator.free(from);
         const to = try fs.path.join(allocator, &.{ dest_path, entry.name });
