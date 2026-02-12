@@ -181,7 +181,9 @@ export fn nvshader_get_stats(ctx: nvshader_ctx_t, out_stats: ?*nvshader_stats_t)
     const stats = context.manager.getStats();
 
     // Calculate age in days using realtime clock
-    const ts = std.posix.clock_gettime(.REALTIME) catch return .error_unknown;
+    var ts: std.os.linux.timespec = undefined;
+    const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
+    if (@as(isize, @bitCast(rc)) < 0) return .error_unknown;
     const now_ns: i128 = @as(i128, ts.sec) * 1_000_000_000 + ts.nsec;
     const ns_per_day: i128 = 24 * 60 * 60 * 1_000_000_000;
 

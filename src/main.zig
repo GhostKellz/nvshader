@@ -88,7 +88,9 @@ fn commandStatus(allocator: std.mem.Allocator, io: Io) void {
     nvshader.stats.printBreakdown(stats);
 
     if (stats.oldest_entry) |oldest| {
-        const now_ts = std.posix.clock_gettime(.REALTIME) catch return;
+        var now_ts: std.os.linux.timespec = undefined;
+        const rc = std.os.linux.clock_gettime(.REALTIME, &now_ts);
+        if (@as(isize, @bitCast(rc)) < 0) return;
         const now_ns: i128 = @as(i128, now_ts.sec) * 1_000_000_000 + now_ts.nsec;
         const age_days = @divTrunc(now_ns - oldest, 86400_000_000_000);
         std.debug.print("\nOldest cache: {d} days old\n", .{age_days});

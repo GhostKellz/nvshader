@@ -612,7 +612,9 @@ pub const P2PDaemon = struct {
 };
 
 fn getTimestamp() i64 {
-    const ts = std.posix.clock_gettime(.REALTIME) catch return 0;
+    var ts: std.os.linux.timespec = undefined;
+    const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
+    if (@as(isize, @bitCast(rc)) < 0) return 0;
     return ts.sec;
 }
 

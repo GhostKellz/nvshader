@@ -15,7 +15,9 @@ fn getIo() Io {
 }
 
 fn nowNanoseconds() i128 {
-    const ts = std.posix.clock_gettime(.MONOTONIC) catch return 0;
+    var ts: std.os.linux.timespec = undefined;
+    const rc = std.os.linux.clock_gettime(.MONOTONIC, &ts);
+    if (@as(isize, @bitCast(rc)) < 0) return 0;
     return @as(i128, ts.sec) * 1_000_000_000 + ts.nsec;
 }
 

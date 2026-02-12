@@ -303,7 +303,8 @@ pub const PackageBuilder = struct {
         var buf: [8192]u8 = undefined;
         var pos: usize = 0;
 
-        const ts = std.posix.clock_gettime(.REALTIME) catch std.os.linux.timespec{ .sec = 0, .nsec = 0 };
+        var ts: std.os.linux.timespec = .{ .sec = 0, .nsec = 0 };
+        _ = std.os.linux.clock_gettime(.REALTIME, &ts);
 
         pos += (std.fmt.bufPrint(buf[pos..], "{{\n  \"version\": {d},\n  \"created_at\": {d},\n", .{ PackageVersion, ts.sec }) catch return error.BufferOverflow).len;
 

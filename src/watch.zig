@@ -53,7 +53,9 @@ pub const WatchStats = struct {
     start_time: i64,
 
     pub fn duration(self: *const WatchStats) i64 {
-        const ts = std.posix.clock_gettime(.REALTIME) catch return 0;
+        var ts: std.os.linux.timespec = undefined;
+        const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
+        if (@as(isize, @bitCast(rc)) < 0) return 0;
         return ts.sec - self.start_time;
     }
 };
@@ -74,14 +76,19 @@ pub const CacheWatcher = struct {
 
     pub fn init(allocator: mem.Allocator) !CacheWatcher {
         // IN_CLOEXEC = 0x80000, IN_NONBLOCK = 0x800
-        const fd = try posix.inotify_init1(0x80000 | 0x800);
+        const fd_result = std.os.linux.inotify_init1(0x80000 | 0x800);
+        const fd_signed: isize = @bitCast(fd_result);
+        if (fd_signed < 0) return error.InotifyInitFailed;
+        const fd: posix.fd_t = @intCast(fd_result);
 
         return CacheWatcher{
             .allocator = allocator,
             .inotify_fd = fd,
             .watch_descriptors = .{},
             .stats = .{ .start_time = blk: {
-                const ts = std.posix.clock_gettime(.REALTIME) catch break :blk 0;
+                var ts: std.os.linux.timespec = undefined;
+                const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
+                if (@as(isize, @bitCast(rc)) < 0) break :blk 0;
                 break :blk ts.sec;
             } },
             .callback = null,
@@ -95,7 +102,7 @@ pub const CacheWatcher = struct {
         // Remove all watches
         var iter = self.watch_descriptors.iterator();
         while (iter.next()) |entry| {
-            _ = posix.inotify_rm_watch(self.inotify_fd, entry.key_ptr.*);
+            _ = std.os.linux.inotify_rm_watch(self.inotify_fd, entry.key_ptr.*);
             self.allocator.free(entry.value_ptr.path);
         }
         self.watch_descriptors.deinit(self.allocator);
@@ -108,7 +115,14 @@ pub const CacheWatcher = struct {
         // IN_CREATE=0x100, IN_MODIFY=0x02, IN_DELETE=0x200, IN_CLOSE_WRITE=0x08
         const mask: u32 = 0x100 | 0x02 | 0x200 | 0x08;
 
-        const wd = try posix.inotify_add_watch(self.inotify_fd, path, mask);
+        // Need null-terminated path for syscall
+        const path_z = try self.allocator.dupeZ(u8, path);
+        defer self.allocator.free(path_z);
+
+        const wd_result = std.os.linux.inotify_add_watch(self.inotify_fd, path_z, mask);
+        const wd_signed: isize = @bitCast(wd_result);
+        if (wd_signed < 0) return error.InotifyAddWatchFailed;
+        const wd: i32 = @intCast(wd_result);
 
         const path_copy = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(path_copy);
@@ -214,7 +228,9 @@ pub const CacheWatcher = struct {
                         .cache_type = watched.cache_type,
                         .size_bytes = 0, // Could stat file for size
                         .timestamp = blk: {
-                            const ts = std.posix.clock_gettime(.REALTIME) catch break :blk 0;
+                            var ts: std.os.linux.timespec = undefined;
+                            const rc = std.os.linux.clock_gettime(.REALTIME, &ts);
+                            if (@as(isize, @bitCast(rc)) < 0) break :blk 0;
                             break :blk ts.sec;
                         },
                     });

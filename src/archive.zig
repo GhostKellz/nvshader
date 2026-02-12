@@ -265,7 +265,8 @@ fn writeManifest(path: []const u8, entries: []const ManifestEntry, game_hint: ?[
     var buf: [65536]u8 = undefined;
     var pos: usize = 0;
 
-    const ts = std.posix.clock_gettime(.REALTIME) catch std.os.linux.timespec{ .sec = 0, .nsec = 0 };
+    var ts: std.os.linux.timespec = .{ .sec = 0, .nsec = 0 };
+    _ = std.os.linux.clock_gettime(.REALTIME, &ts);
 
     pos += (std.fmt.bufPrint(buf[pos..], "{{\n  \"version\": {d},\n  \"created_at\": {d},\n", .{ ManifestVersion, ts.sec }) catch return error.BufferOverflow).len;
 
