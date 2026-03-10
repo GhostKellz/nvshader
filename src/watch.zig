@@ -2,6 +2,7 @@ const std = @import("std");
 const fs = std.fs;
 const mem = std.mem;
 const posix = std.posix;
+const closeFd = std.Io.Threaded.closeFd;
 const types = @import("types.zig");
 const paths = @import("paths.zig");
 
@@ -107,7 +108,7 @@ pub const CacheWatcher = struct {
         }
         self.watch_descriptors.deinit(self.allocator);
 
-        posix.close(self.inotify_fd);
+        closeFd(self.inotify_fd);
     }
 
     /// Add a path to watch

@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const posix = std.posix;
+const closeFd = std.Io.Threaded.closeFd;
 const cache = @import("cache.zig");
 const steam = @import("steam.zig");
 const sharing = @import("sharing.zig");
@@ -83,7 +84,7 @@ pub const IpcServer = struct {
         const sock_signed: isize = @bitCast(sock_result);
         if (sock_signed < 0) return error.SocketCreateFailed;
         const sock: posix.socket_t = @intCast(sock_result);
-        errdefer posix.close(sock);
+        errdefer closeFd(sock);
 
         // Bind to socket path
         var addr: std.os.linux.sockaddr.un = .{ .family = AF_UNIX, .path = undefined };
@@ -110,7 +111,7 @@ pub const IpcServer = struct {
     pub fn stop(self: *IpcServer) void {
         self.running = false;
         if (self.socket_fd) |fd| {
-            posix.close(fd);
+            closeFd(fd);
             self.socket_fd = null;
         }
         Dir.cwd().deleteFile(getIo(), socket_path) catch {};
@@ -133,7 +134,7 @@ pub const IpcServer = struct {
         }
 
         const client: posix.socket_t = @intCast(result);
-        defer posix.close(client);
+        defer closeFd(client);
 
         self.handleClient(client) catch {};
     }
@@ -168,7 +169,7 @@ pub const IpcServer = struct {
         const s = manager.getStats();
 
         return std.fmt.bufPrint(buf,
-            \\{{"status":"ok","version":"0.1.1","entries":{d},"total_bytes":{d},"nvidia_bytes":{d},"mesa_bytes":{d},"fossilize_bytes":{d},"dxvk_bytes":{d}}}
+            \\{{"status":"ok","version":"0.1.3","entries":{d},"total_bytes":{d},"nvidia_bytes":{d},"mesa_bytes":{d},"fossilize_bytes":{d},"dxvk_bytes":{d}}}
         , .{
             manager.entries.items.len,
             s.total_size_bytes,
@@ -244,7 +245,7 @@ pub const IpcClient = struct {
         const sock_signed: isize = @bitCast(sock_result);
         if (sock_signed < 0) return error.SocketCreateFailed;
         const sock: i32 = @intCast(sock_result);
-        defer posix.close(sock);
+        defer closeFd(sock);
 
         var addr: std.os.linux.sockaddr.un = .{ .family = AF_UNIX, .path = undefined };
         @memset(&addr.path, 0);
@@ -296,7 +297,7 @@ pub fn isDaemonRunning() bool {
     const sock_signed: isize = @bitCast(sock_result);
     if (sock_signed < 0) return false;
     const sock: posix.socket_t = @intCast(sock_result);
-    defer posix.close(sock);
+    defer closeFd(sock);
 
     var addr: std.os.linux.sockaddr.un = .{ .family = AF_UNIX, .path = undefined };
     @memset(&addr.path, 0);

@@ -10,6 +10,7 @@
 
 const std = @import("std");
 const posix = std.posix;
+const closeFd = std.Io.Threaded.closeFd;
 const mem = std.mem;
 const json = std.json;
 
@@ -260,12 +261,12 @@ pub const P2PNode = struct {
         if (!self.running) return;
 
         if (self.discovery_socket) |sock| {
-            posix.close(sock);
+            closeFd(sock);
             self.discovery_socket = null;
         }
 
         if (self.transfer_socket) |sock| {
-            posix.close(sock);
+            closeFd(sock);
             self.transfer_socket = null;
         }
 
@@ -428,7 +429,7 @@ pub const P2PNode = struct {
         const sock_signed: isize = @bitCast(sock_result);
         if (sock_signed < 0) return error.SocketCreateFailed;
         const sock: i32 = @intCast(sock_result);
-        defer posix.close(sock);
+        defer closeFd(sock);
 
         var addr = sockaddr_in{
             .port = mem.nativeToBig(u16, peer_port),
