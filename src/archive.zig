@@ -75,7 +75,7 @@ pub fn exportSelection(
 
     try dest_dir.createDirPath(io, "cache");
 
-    var manifest_entries: std.ArrayListUnmanaged(ManifestEntry) = .{};
+    var manifest_entries: std.ArrayListUnmanaged(ManifestEntry) = .empty;
     defer {
         for (manifest_entries.items) |entry| {
             allocator.free(entry.stored_path);

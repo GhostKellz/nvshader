@@ -142,8 +142,8 @@ pub const P2PNode = struct {
             .discovery_socket = null,
             .transfer_socket = null,
             .port = TRANSFER_PORT,
-            .peers = .{},
-            .local_caches = .{},
+            .peers = .empty,
+            .local_caches = .empty,
             .running = false,
             .last_announce = 0,
         };

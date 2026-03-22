@@ -213,7 +213,7 @@ pub const PackageBuilder = struct {
     pub fn init(allocator: mem.Allocator) PackageBuilder {
         return .{
             .allocator = allocator,
-            .entries = .{},
+            .entries = .empty,
             .game_name = null,
             .game_id = null,
         };

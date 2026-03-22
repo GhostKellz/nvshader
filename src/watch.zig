@@ -85,7 +85,7 @@ pub const CacheWatcher = struct {
         return CacheWatcher{
             .allocator = allocator,
             .inotify_fd = fd,
-            .watch_descriptors = .{},
+            .watch_descriptors = .empty,
             .stats = .{ .start_time = blk: {
                 var ts: std.os.linux.timespec = undefined;
                 const rc = std.os.linux.clock_gettime(.REALTIME, &ts);

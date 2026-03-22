@@ -174,7 +174,7 @@ pub const CacheManager = struct {
         return CacheManager{
             .allocator = allocator,
             .cache_paths = try paths.CachePaths.detect(allocator),
-            .entries = .{},
+            .entries = .empty,
         };
     }
 

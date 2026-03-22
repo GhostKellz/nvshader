@@ -141,7 +141,7 @@ pub const PrewarmEngine = struct {
         }
 
         // Build fossilize_replay command
-        var args = std.ArrayListUnmanaged([]const u8){};
+        var args = std.ArrayListUnmanaged([]const u8).empty;
         defer args.deinit(self.allocator);
 
         try args.append(self.allocator, replay_path);
@@ -199,7 +199,7 @@ pub const PrewarmEngine = struct {
         var dir = Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch return .{ .completed = 0, .failed = 0 };
         defer dir.close(io);
 
-        var foz_files = std.ArrayListUnmanaged([]const u8){};
+        var foz_files = std.ArrayListUnmanaged([]const u8).empty;
         defer {
             for (foz_files.items) |f| self.allocator.free(f);
             foz_files.deinit(self.allocator);

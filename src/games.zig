@@ -42,8 +42,8 @@ pub const Game = struct {
     id: []const u8,
     name: []const u8,
     install_path: []const u8,
-    cache_paths: std.ArrayListUnmanaged([]const u8) = .{},
-    tags: std.ArrayListUnmanaged([]const u8) = .{},
+    cache_paths: std.ArrayListUnmanaged([]const u8) = .empty,
+    tags: std.ArrayListUnmanaged([]const u8) = .empty,
 
     allocator: mem.Allocator,
 
@@ -77,7 +77,7 @@ pub const GameCatalog = struct {
     pub fn init(allocator: mem.Allocator) GameCatalog {
         return GameCatalog{
             .allocator = allocator,
-            .games = .{},
+            .games = .empty,
         };
     }
 

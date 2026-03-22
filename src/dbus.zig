@@ -169,7 +169,7 @@ pub const IpcServer = struct {
         const s = manager.getStats();
 
         return std.fmt.bufPrint(buf,
-            \\{{"status":"ok","version":"0.1.3","entries":{d},"total_bytes":{d},"nvidia_bytes":{d},"mesa_bytes":{d},"fossilize_bytes":{d},"dxvk_bytes":{d}}}
+            \\{{"status":"ok","version":"0.1.4","entries":{d},"total_bytes":{d},"nvidia_bytes":{d},"mesa_bytes":{d},"fossilize_bytes":{d},"dxvk_bytes":{d}}}
         , .{
             manager.entries.items.len,
             s.total_size_bytes,

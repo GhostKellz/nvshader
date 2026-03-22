@@ -13,7 +13,7 @@ pub const sharing = @import("sharing.zig");
 pub const ipc = @import("dbus.zig");
 
 /// nvshader version
-pub const version = "0.1.3";
+pub const version = "0.1.4";
 
 pub const CacheType = types.CacheType;
 pub const CacheStats = types.CacheStats;

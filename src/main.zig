@@ -302,7 +302,7 @@ fn commandExport(allocator: std.mem.Allocator, io: Io, args: []const [:0]const u
     manager.scan() catch {};
 
     // Export all entries
-    var indices = std.ArrayListUnmanaged(usize){};
+    var indices = std.ArrayListUnmanaged(usize).empty;
     defer indices.deinit(allocator);
 
     for (manager.entries.items, 0..) |_, idx| {

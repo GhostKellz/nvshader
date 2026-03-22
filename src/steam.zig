@@ -56,8 +56,8 @@ pub const SteamDetector = struct {
         var detector = SteamDetector{
             .allocator = allocator,
             .steam_root = null,
-            .libraries = .{},
-            .games = .{},
+            .libraries = .empty,
+            .games = .empty,
         };
 
         try detector.detectSteamRoot();
@@ -275,7 +275,7 @@ pub const SteamDetector = struct {
         stdout.print("Recently Played:\n", .{}) catch {};
 
         // Sort by last_played (simple bubble sort for small list)
-        var sorted: std.ArrayListUnmanaged(SteamGame) = .{};
+        var sorted: std.ArrayListUnmanaged(SteamGame) = .empty;
         defer sorted.deinit(self.allocator);
 
         for (self.games.items) |game| {
